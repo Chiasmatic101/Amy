@@ -256,7 +256,7 @@ Solve Three Problems within The Clinical Trial Industry          </h2>
             </h2>
 
             <p className="mt-10 text-lg leading-relaxed text-black/60 md:text-xl">
-              Complete gameplay sessions are preserved so
+              Complete gcdameplay sessions are preserved so
               researchers can return to the original behavioral
               record as new questions, methods and models emerge.
             </p>
