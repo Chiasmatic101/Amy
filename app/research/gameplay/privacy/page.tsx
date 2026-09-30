@@ -69,7 +69,7 @@ export default function MatchThreePrivacyPage() {
                 <br />
                 United States
                 <br />
-                Ages 18+
+                Ages 13+
               </p>
 
               <a
