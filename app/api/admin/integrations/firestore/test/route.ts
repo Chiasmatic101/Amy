@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-
-import { getExternalFirestore } from "@/lib/integrations/firestore/firestore-connector";
+import { getAmyGoogleAuthClient } from "@/lib/integrations/firestore/vercel-google-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
-    // Protect this administrative endpoint.
     const adminSecret = process.env.AMY_ADMIN_SECRET;
 
     if (!adminSecret) {
@@ -47,40 +45,87 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Authenticate through:
-    // Vercel OIDC -> Google WIF -> AMY Firestore Connector
-    const externalDb =
-      await getExternalFirestore(projectId);
+    // Vercel OIDC -> Google WIF ->
+    // AMY Firestore Connector service account
+    const authClient = getAmyGoogleAuthClient();
 
-    // Read only a few documents.
-    // We deliberately do not return uid or other player data.
-    const snapshot = await externalDb
-      .collection("events")
-      .limit(5)
-      .get();
+    const accessToken =
+      await authClient.getAccessToken();
 
-    const sampleEvents = snapshot.docs.map((doc) => {
-      const data = doc.data();
+    if (!accessToken.token) {
+      throw new Error(
+        "Google Workload Identity Federation did not return an access token."
+      );
+    }
 
-      return {
-        documentId: doc.id,
-        event:
-          typeof data.event === "string"
-            ? data.event
-            : null,
-        sessionIdPresent:
-          typeof data.sessionId === "string",
-        timestampPresent:
-          data.createdAt != null,
-      };
+    // Read the external Firestore directly through
+    // Google's Firestore REST API.
+    const url =
+      `https://firestore.googleapis.com/v1/projects/` +
+      `${encodeURIComponent(projectId)}` +
+      `/databases/(default)/documents/events?pageSize=5`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken.token}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
     });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      return NextResponse.json(
+        {
+          success: false,
+          stage: "firestore-read",
+          status: response.status,
+          googleError: result,
+        },
+        { status: 500 }
+      );
+    }
+
+    const documents =
+      Array.isArray(result.documents)
+        ? result.documents
+        : [];
+
+    const sampleEvents = documents.map(
+      (document: {
+        name?: string;
+        fields?: Record<
+          string,
+          {
+            stringValue?: string;
+          }
+        >;
+      }) => ({
+        documentId:
+          document.name?.split("/").pop() ?? null,
+
+        event:
+          document.fields?.event?.stringValue ?? null,
+
+        sessionIdPresent:
+          Boolean(
+            document.fields?.sessionId?.stringValue
+          ),
+
+        timestampPresent:
+          Boolean(document.fields?.createdAt),
+      })
+    );
 
     return NextResponse.json({
       success: true,
-      connection: "firestore",
+      authentication: "vercel-oidc-google-wif",
+      connection: "firestore-rest",
       projectId,
       collection: "events",
-      documentsFound: snapshot.size,
+      documentsFound: documents.length,
       sampleEvents,
     });
   } catch (error) {
@@ -92,6 +137,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
+        stage: "authentication",
         error:
           error instanceof Error
             ? error.message
