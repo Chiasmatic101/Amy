@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { getAmyGoogleAuthClient } from "@/lib/integrations/firestore/vercel-google-auth";
 
+import {
+  mapFirestoreEvent,
+  RawFirestoreDocument,
+} from "@/lib/integrations/firestore/firestore-mapper";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -173,25 +178,13 @@ export async function GET(request: NextRequest) {
     // This endpoint is only proving that AMY can discover
     // gameplay events across telemetry IDs.
     // ---------------------------------------------------------
-
-    const sampleEvents = documents.map(
-      (document: {
-        name?: string;
-
-        fields?: Record<
-          string,
-          {
-            stringValue?: string;
-            integerValue?: string;
-            timestampValue?: string;
-            booleanValue?: boolean;
-            doubleValue?: number;
-          }
-        >;
-      }) => {
-        const pathParts =
-          document.name?.split("/") ?? [];
-
+const mappedEvents = documents.map(
+  (document: RawFirestoreDocument) =>
+    mapFirestoreEvent(
+      document,
+      "chiasmatic-calamity"
+    )
+);
         /*
           A document name should look approximately like:
 
@@ -209,63 +202,34 @@ export async function GET(request: NextRequest) {
           third-to-last = telemetry ID
         */
 
-        const documentId =
-          pathParts.length > 0
-            ? pathParts[pathParts.length - 1]
-            : null;
-
-        const telemetryId =
-          pathParts.length >= 3
-            ? pathParts[pathParts.length - 3]
-            : null;
-
-        return {
-          documentId,
-
-          telemetryId,
-
-          event:
-            document.fields?.event?.stringValue ??
-            null,
-
-          sessionId:
-            document.fields?.sessionId?.stringValue ??
-            null,
-
-          timestampPresent:
-            Boolean(
-              document.fields?.createdAt
-            ),
-        };
-      }
-    );
 
     // ---------------------------------------------------------
     // 8. Successful result
     // ---------------------------------------------------------
 
-    return NextResponse.json({
-      success: true,
+   return NextResponse.json({
+  success: true,
 
-      authentication:
-        "vercel-oidc-google-wif",
+  authentication:
+    "vercel-oidc-google-wif",
 
-      connection:
-        "firestore-rest",
+  connection:
+    "firestore-rest",
 
-      projectId,
+  projectId,
 
-      query:
-        "collection-group",
+  query:
+    "collection-group",
 
-      collection:
-        "events",
+  collection:
+    "events",
 
-      documentsFound:
-        documents.length,
+  documentsFound:
+    documents.length,
 
-      sampleEvents,
-    });
+  mappedEvents,
+});
+
   } catch (error) {
     // ---------------------------------------------------------
     // 9. Authentication / unexpected errors
