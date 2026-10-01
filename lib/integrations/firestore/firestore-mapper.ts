@@ -156,10 +156,18 @@ export function mapFirestoreEvent(
       ? fields.sessionId
       : null;
 
-  const externalPlayerId =
-    typeof fields.uid === "string"
-      ? fields.uid
-      : null;
+  const pathParts =
+  document.name?.split("/") ?? [];
+
+const telemetryId =
+  pathParts.length >= 3
+    ? pathParts[pathParts.length - 3]
+    : null;
+
+const externalPlayerId =
+  typeof fields.uid === "string"
+    ? fields.uid
+    : telemetryId;
 
   const eventTimestamp =
     typeof fields.createdAt === "string"
@@ -179,10 +187,10 @@ export function mapFirestoreEvent(
   }
 
   if (!externalPlayerId) {
-    throw new Error(
-      `Firestore event ${documentId} is missing uid.`
-    );
-  }
+  throw new Error(
+    `Firestore event ${documentId} has no usable external player identifier.`
+  );
+}
 
   if (!eventTimestamp) {
     throw new Error(
