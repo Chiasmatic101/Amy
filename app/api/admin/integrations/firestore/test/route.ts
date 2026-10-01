@@ -60,15 +60,11 @@ export async function GET(request: NextRequest) {
 
     // Read the external Firestore directly through
     // Google's Firestore REST API.
-   const telemetryId = "1779897291355";
-
 const url =
   `https://firestore.googleapis.com/v1/projects/` +
   `${encodeURIComponent(projectId)}` +
-  `/databases/(default)/documents/gameTelemetry/` +
-  `${encodeURIComponent(telemetryId)}` +
-  `/events?pageSize=5`;
-  
+  `/databases/(default)/documents/gameTelemetry?pageSize=20`;
+
     const response = await fetch(url, {
       method: "GET",
       headers: {
@@ -97,41 +93,27 @@ const url =
         ? result.documents
         : [];
 
-    const sampleEvents = documents.map(
-      (document: {
-        name?: string;
-        fields?: Record<
-          string,
-          {
-            stringValue?: string;
-          }
-        >;
-      }) => ({
-        documentId:
-          document.name?.split("/").pop() ?? null,
+  const telemetryDocuments = documents.map(
+  (document: {
+    name?: string;
+    fields?: Record<string, unknown>;
+  }) => ({
+    telemetryId:
+      document.name?.split("/").pop() ?? null,
+    fieldsPresent:
+      Object.keys(document.fields ?? {}),
+  })
+);
 
-        event:
-          document.fields?.event?.stringValue ?? null,
-
-        sessionIdPresent:
-          Boolean(
-            document.fields?.sessionId?.stringValue
-          ),
-
-        timestampPresent:
-          Boolean(document.fields?.createdAt),
-      })
-    );
-
-    return NextResponse.json({
-      success: true,
-      authentication: "vercel-oidc-google-wif",
-      connection: "firestore-rest",
-      projectId,
-      collection: "events",
-      documentsFound: documents.length,
-      sampleEvents,
-    });
+  return NextResponse.json({
+  success: true,
+  authentication: "vercel-oidc-google-wif",
+  connection: "firestore-rest",
+  projectId,
+  collection: "gameTelemetry",
+  documentsFound: documents.length,
+  telemetryDocuments,
+});
   } catch (error) {
     console.error(
       "External Firestore connection test failed:",
