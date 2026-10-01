@@ -60,11 +60,15 @@ export async function GET(request: NextRequest) {
 
     // Read the external Firestore directly through
     // Google's Firestore REST API.
-    const url =
-      `https://firestore.googleapis.com/v1/projects/` +
-      `${encodeURIComponent(projectId)}` +
-      `/databases/(default)/documents/events?pageSize=5`;
+   const telemetryId = "1779897291355";
 
+const url =
+  `https://firestore.googleapis.com/v1/projects/` +
+  `${encodeURIComponent(projectId)}` +
+  `/databases/(default)/documents/gameTelemetry/` +
+  `${encodeURIComponent(telemetryId)}` +
+  `/events?pageSize=5`;
+  
     const response = await fetch(url, {
       method: "GET",
       headers: {
