@@ -1,13 +1,4 @@
-import {
-  App,
-  getApps,
-  initializeApp,
-} from "firebase-admin/app";
-
-import {
-  Firestore,
-  getFirestore,
-} from "firebase-admin/firestore";
+import { Firestore } from "@google-cloud/firestore";
 
 import {
   getAmyGoogleAuthClient,
@@ -18,10 +9,22 @@ const externalFirestoreInstances = new Map<
   Firestore
 >();
 
-async function getExternalAccessToken(): Promise<string> {
+export async function getExternalFirestore(
+  projectId: string
+): Promise<Firestore> {
+  const existing =
+    externalFirestoreInstances.get(projectId);
+
+  if (existing) {
+    return existing;
+  }
+
   const authClient = getAmyGoogleAuthClient();
 
-  const accessToken = await authClient.getAccessToken();
+  // Force authentication here so WIF / impersonation
+  // failures occur before the first Firestore query.
+  const accessToken =
+    await authClient.getAccessToken();
 
   if (!accessToken.token) {
     throw new Error(
@@ -29,74 +32,16 @@ async function getExternalAccessToken(): Promise<string> {
     );
   }
 
-  return accessToken.token;
-}
+  const firestore = new Firestore({
+    projectId,
 
-export async function getExternalFirestore(
-  projectId: string
-): Promise<Firestore> {
-  const existingFirestore =
-    externalFirestoreInstances.get(projectId);
-
-  if (existingFirestore) {
-    return existingFirestore;
-  }
-
-  const accessToken = await getExternalAccessToken();
-
-  const appName = `external-${projectId}`;
-
-  let app: App;
-
-  const existingApp = getApps().find(
-    (candidate) => candidate.name === appName
-  );
-
-  if (existingApp) {
-    app = existingApp;
-  } else {
-    app = initializeApp(
-      {
-        projectId,
-        credential: {
-          getAccessToken: async () => {
-            const authClient =
-              getAmyGoogleAuthClient();
-
-            const token =
-              await authClient.getAccessToken();
-
-            if (!token.token) {
-              throw new Error(
-                "Unable to obtain Google access token."
-              );
-            }
-
-            return {
-              access_token: token.token,
-              expires_in: 3600,
-            };
-          },
-        },
-      },
-      appName
-    );
-  }
-
-  const firestore = getFirestore(app);
+    auth: authClient,
+  });
 
   externalFirestoreInstances.set(
     projectId,
     firestore
   );
-
-  // Force authentication now rather than waiting
-  // until the first Firestore query.
-  if (!accessToken) {
-    throw new Error(
-      "Unable to authenticate external Firestore connection."
-    );
-  }
 
   return firestore;
 }
