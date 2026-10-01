@@ -3,8 +3,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAmyGoogleAuthClient } from "@/lib/integrations/firestore/vercel-google-auth";
 
 import {
-  mapFirestoreEvent,
+  prepareFirestoreImport,
+} from "@/lib/integrations/firestore/firestore-importer";
+
+import {
   RawFirestoreDocument,
+} from "@/lib/integrations/firestore/firestore-mapper";
+
+import {
+  mapFirestoreEvent,
 } from "@/lib/integrations/firestore/firestore-mapper";
 
 export const runtime = "nodejs";
@@ -120,7 +127,7 @@ export async function GET(request: NextRequest) {
             },
           ],
 
-          limit: 5,
+          limit: 100,
         },
       }),
 
@@ -178,12 +185,9 @@ export async function GET(request: NextRequest) {
     // This endpoint is only proving that AMY can discover
     // gameplay events across telemetry IDs.
     // ---------------------------------------------------------
-const mappedEvents = documents.map(
-  (document: RawFirestoreDocument) =>
-    mapFirestoreEvent(
-      document,
-      "chiasmatic-calamity"
-    )
+const dryRun = prepareFirestoreImport(
+  documents as RawFirestoreDocument[],
+  "chiasmatic-calamity"
 );
         /*
           A document name should look approximately like:
@@ -207,7 +211,7 @@ const mappedEvents = documents.map(
     // 8. Successful result
     // ---------------------------------------------------------
 
-   return NextResponse.json({
+ return NextResponse.json({
   success: true,
 
   authentication:
@@ -224,10 +228,7 @@ const mappedEvents = documents.map(
   collection:
     "events",
 
-  documentsFound:
-    documents.length,
-
-  mappedEvents,
+  dryRun,
 });
 
   } catch (error) {
