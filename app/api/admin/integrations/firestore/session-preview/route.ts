@@ -3,6 +3,10 @@ import {
 } from "@/lib/integrations/firestore/firestore-consent";
 
 import {
+  processFirestoreSession,
+} from "@/lib/integrations/firestore/firestore-session-processor";
+
+import {
   validateFirestoreSessionDocuments,
 } from "@/lib/integrations/firestore/firestore-session-validation";
 
@@ -409,7 +413,26 @@ const consentValidation =
     userDocument
   );
 
+/*
+ * =====================================================
+ * CANONICALIZE + PSEUDONYMIZE
+ * =====================================================
+ *
+ * This crosses the privacy boundary.
+ *
+ * The resulting canonical session contains playerHash,
+ * but no raw UID or profile information.
+ *
+ * Still no AMY database writes.
+ */
 
+const processedSession =
+  processFirestoreSession(
+    integration,
+    firstSession,
+    completeSession,
+    consentValidation
+  );
 
     /*
      * =====================================================
@@ -545,7 +568,52 @@ consentValidation: {
   reason:
     consentValidation.reason,
 },
+canonicalSession: {
+  sessionId:
+    processedSession.sessionId,
 
+  playerHash:
+    processedSession.playerHash,
+
+  eventCount:
+    processedSession.eventCount,
+
+  completeness:
+    processedSession.completeness,
+
+  firstEventTimestamp:
+    processedSession.firstEventTimestamp,
+
+  lastEventTimestamp:
+    processedSession.lastEventTimestamp,
+
+  /*
+   * Return only the first few canonical events
+   * so we can inspect the transformation.
+   */
+
+  previewEvents:
+    processedSession.events
+      .slice(0, 5)
+      .map(
+        (event) => ({
+          eventId:
+            event.eventId,
+
+          eventSequence:
+            event.eventSequence,
+
+          event:
+            event.event,
+
+          eventTimestamp:
+            event.eventTimestamp,
+
+          data:
+            event.data,
+        })
+      ),
+},
 
 
 },
