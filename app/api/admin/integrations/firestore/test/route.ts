@@ -265,23 +265,23 @@ export async function GET(
       );
     }
 
-    const pathParts =
-      firstDocument.name.split(
-        "/"
-      );
+   const pathParts =
+  firstDocument.name.split("/");
 
-    const externalPlayerId =
-  pathParts.length >= 6 &&
-  pathParts[pathParts.length - 6] === "users"
-    ? pathParts[pathParts.length - 5]
+const usersIndex =
+  pathParts.lastIndexOf("users");
+
+const externalPlayerId =
+  usersIndex >= 0 &&
+  usersIndex + 1 < pathParts.length
+    ? pathParts[usersIndex + 1]
     : null;
 
-    if (!externalPlayerId) {
-      throw new Error(
-        "Unable to determine external player ID."
-      );
-    }
-
+if (!externalPlayerId) {
+  throw new Error(
+    "Unable to determine external player ID from Firestore document path."
+  );
+}
     // ---------------------------------------------------------
     // 9. Retrieve the external user's consent record
     //

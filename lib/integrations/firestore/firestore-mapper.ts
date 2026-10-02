@@ -156,13 +156,16 @@ export function mapFirestoreEvent(
       ? fields.sessionId
       : null;
 
-  const pathParts =
+ const pathParts =
   document.name?.split("/") ?? [];
 
+const usersIndex =
+  pathParts.lastIndexOf("users");
+
 const pathUid =
-  pathParts.length >= 6 &&
-  pathParts[pathParts.length - 6] === "users"
-    ? pathParts[pathParts.length - 5]
+  usersIndex >= 0 &&
+  usersIndex + 1 < pathParts.length
+    ? pathParts[usersIndex + 1]
     : null;
 
 const externalPlayerId =
