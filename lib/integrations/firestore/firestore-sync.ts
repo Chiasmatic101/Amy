@@ -16,7 +16,17 @@ export type FirestoreStructuredQuery = {
       direction: "ASCENDING";
     }>;
 
-    startAfter?: {
+    /*
+     * Firestore REST StructuredQuery uses startAt.
+     *
+     * before: false means:
+     *
+     * start strictly AFTER the supplied cursor.
+     */
+
+    startAt?: {
+      before: false;
+
       values: Array<
         | {
             timestampValue: string;
@@ -41,17 +51,17 @@ export type FirestoreStructuredQuery = {
  * First synchronization:
  *
  *   createdAt ASC
- *   document ID ASC
+ *   __name__ ASC
  *
  * Later synchronizations:
  *
- *   start AFTER:
+ *   start after:
  *
  *   watermarkTimestamp
- *   watermarkEventId
+ *   watermark document path
  *
- * This gives us a deterministic cursor even when multiple
- * events have exactly the same createdAt timestamp.
+ * The document name is our deterministic tie-breaker when
+ * several events have the same createdAt timestamp.
  * =========================================================
  */
 
@@ -64,10 +74,6 @@ export function buildFirestoreSyncQuery(
       "Firestore sync pageSize must be at least 1."
     );
   }
-
-  /*
-   * Keep below Firestore's practical query limits.
-   */
 
   if (pageSize > 500) {
     throw new Error(
@@ -98,16 +104,10 @@ export function buildFirestoreSyncQuery(
             "ASCENDING",
         },
 
-        /*
-         * Firestore document ID.
-         *
-         * This becomes our deterministic tie-breaker
-         * when multiple events share a timestamp.
-         */
-
         {
           field: {
-            fieldPath: "__name__",
+            fieldPath:
+              "__name__",
           },
 
           direction:
@@ -115,11 +115,16 @@ export function buildFirestoreSyncQuery(
         },
       ],
 
-      limit: pageSize,
+      limit:
+        pageSize,
     };
 
   /*
-   * No watermark = first synchronization.
+   * =====================================================
+   * FIRST SYNCHRONIZATION
+   * =====================================================
+   *
+   * No cursor yet.
    */
 
   if (
@@ -132,9 +137,11 @@ export function buildFirestoreSyncQuery(
   }
 
   /*
-   * A partially populated watermark is unsafe.
+   * =====================================================
+   * WATERMARK VALIDATION
+   * =====================================================
    *
-   * Fail rather than risk skipping events.
+   * Having only half of the cursor is unsafe.
    */
 
   if (
@@ -147,12 +154,17 @@ export function buildFirestoreSyncQuery(
   }
 
   /*
-   * __name__ cursors require the complete Firestore
-   * document resource name, not merely the final
-   * document ID.
+   * =====================================================
+   * BUILD DOCUMENT REFERENCE
+   * =====================================================
    *
-   * watermarkEventId therefore stores the complete
-   * source document name.
+   * watermarkEventId currently contains the complete
+   * document path beneath /documents/, for example:
+   *
+   * users/ABC123/gameTelemetry/SESSION/events/EVENT
+   *
+   * Firestore's __name__ cursor requires the full
+   * resource name.
    */
 
   const referenceValue =
@@ -160,7 +172,25 @@ export function buildFirestoreSyncQuery(
     `/databases/(default)/documents/` +
     `${integration.watermarkEventId}`;
 
-  structuredQuery.startAfter = {
+  /*
+   * =====================================================
+   * FIRESTORE CURSOR
+   * =====================================================
+   *
+   * Firestore REST does not have a StructuredQuery
+   * "startAfter" field.
+   *
+   * Instead:
+   *
+   * startAt.before = false
+   *
+   * means start strictly AFTER this cursor.
+   */
+
+  structuredQuery.startAt = {
+    before:
+      false,
+
     values: [
       {
         timestampValue:
