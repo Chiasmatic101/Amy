@@ -8,6 +8,10 @@ import {
 } from "@/lib/integrations/firestore/vercel-google-auth";
 
 import {
+  evaluateFirestoreConsent,
+} from "@/lib/integrations/firestore/firestore-consent";
+
+import {
   RawFirestoreDocument,
 } from "@/lib/integrations/firestore/firestore-mapper";
 
@@ -19,7 +23,7 @@ export async function GET(
 ) {
   try {
     // ---------------------------------------------------------
-    // 1. Protect this administrative endpoint
+    // 1. Protect administrative endpoint
     // ---------------------------------------------------------
 
     const adminSecret =
@@ -71,13 +75,13 @@ export async function GET(
     }
 
     // ---------------------------------------------------------
-    // 3. Authenticate to Google
+    // 3. Authenticate
     //
-    // Vercel OIDC
-    //      ↓
-    // Google Workload Identity Federation
-    //      ↓
-    // AMY Firestore Connector service account
+    // Vercel
+    //   ↓
+    // Workload Identity Federation
+    //   ↓
+    // AMY Firestore Connector
     // ---------------------------------------------------------
 
     const authClient =
@@ -93,11 +97,7 @@ export async function GET(
     }
 
     // ---------------------------------------------------------
-    // 4. Collection-group query
-    //
-    // Find documents in every collection named "events".
-    //
-    // For this diagnostic we only need ONE document.
+    // 4. Retrieve newest telemetry event
     // ---------------------------------------------------------
 
     const queryUrl =
@@ -123,26 +123,32 @@ export async function GET(
           },
 
           body: JSON.stringify({
-  structuredQuery: {
-    from: [
-      {
-        collectionId: "events",
-        allDescendants: true,
-      },
-    ],
+            structuredQuery: {
+              from: [
+                {
+                  collectionId:
+                    "events",
 
-    orderBy: [
-      {
-        field: {
-          fieldPath: "createdAt",
-        },
-        direction: "DESCENDING",
-      },
-    ],
+                  allDescendants:
+                    true,
+                },
+              ],
 
-    limit: 1,
-  },
-}),
+              orderBy: [
+                {
+                  field: {
+                    fieldPath:
+                      "createdAt",
+                  },
+
+                  direction:
+                    "DESCENDING",
+                },
+              ],
+
+              limit: 1,
+            },
+          }),
 
           cache: "no-store",
         }
@@ -152,7 +158,7 @@ export async function GET(
       await response.json();
 
     // ---------------------------------------------------------
-    // 5. Firestore error handling
+    // 5. Handle Firestore query errors
     // ---------------------------------------------------------
 
     if (!response.ok) {
@@ -174,7 +180,7 @@ export async function GET(
     }
 
     // ---------------------------------------------------------
-    // 6. Extract returned documents
+    // 6. Extract document
     // ---------------------------------------------------------
 
     const queryResults =
@@ -195,62 +201,39 @@ export async function GET(
       return NextResponse.json({
         success: true,
 
-        diagnostic: true,
-
-        projectId,
-
         documentsFound: 0,
 
         message:
-          "No external telemetry events were found.",
+          "No telemetry events were found.",
       });
     }
 
-    // ---------------------------------------------------------
-    // 7. Inspect exactly what Firestore returned
-    // ---------------------------------------------------------
-
-    const firstDocument =
+    const eventDocument =
       documents[0];
 
-    if (!firstDocument) {
+    if (!eventDocument?.name) {
       throw new Error(
-        "No Firestore document available for inspection."
+        "Telemetry event does not contain a document path."
       );
     }
 
-    const documentName =
-      firstDocument.name ?? null;
-
-    const fields =
-      firstDocument.fields ?? {};
-
-    const fieldNames =
-      Object.keys(fields);
-
     // ---------------------------------------------------------
-    // 8. Inspect the Firestore path
+    // 7. Extract UID from document path
     //
-    // We are specifically looking for whether the path is:
+    // Expected:
     //
     // users/{uid}/gameTelemetry/{sessionId}/events/{eventId}
-    //
-    // OR:
-    //
-    // gameTelemetry/{sessionId}/events/{eventId}
     // ---------------------------------------------------------
 
     const pathParts =
-      documentName
-        ? documentName.split("/")
-        : [];
+      eventDocument.name.split("/");
 
     const usersIndex =
       pathParts.lastIndexOf(
         "users"
       );
 
-    const uidFromPath =
+    const pathUid =
       usersIndex >= 0 &&
       usersIndex + 1 <
         pathParts.length
@@ -259,55 +242,148 @@ export async function GET(
           ]
         : null;
 
-    const gameTelemetryIndex =
-      pathParts.lastIndexOf(
-        "gameTelemetry"
+    if (!pathUid) {
+      return NextResponse.json(
+        {
+          success: false,
+
+          stage:
+            "identity-validation",
+
+          reason:
+            "Telemetry event does not contain a users/{uid} path.",
+
+          legacyTelemetry:
+            true,
+        },
+        { status: 422 }
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 8. Extract UID stored in event
+    // ---------------------------------------------------------
+
+    const eventUid =
+      eventDocument
+        .fields
+        ?.uid
+        ?.stringValue ??
+      null;
+
+    if (!eventUid) {
+      return NextResponse.json(
+        {
+          success: false,
+
+          stage:
+            "identity-validation",
+
+          reason:
+            "Telemetry event does not contain a uid field.",
+        },
+        { status: 422 }
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 9. Verify path UID matches event UID
+    //
+    // We do NOT guess if they disagree.
+    // ---------------------------------------------------------
+
+    const identityValid =
+      pathUid === eventUid;
+
+    if (!identityValid) {
+      return NextResponse.json(
+        {
+          success: false,
+
+          stage:
+            "identity-validation",
+
+          identityValid:
+            false,
+
+          reason:
+            "UID in telemetry path does not match UID stored in event.",
+        },
+        { status: 422 }
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 10. Retrieve users/{uid}
+    //
+    // UID is used only for the source lookup.
+    // ---------------------------------------------------------
+
+    const userUrl =
+      `https://firestore.googleapis.com/v1/projects/` +
+      `${encodeURIComponent(projectId)}` +
+      `/databases/(default)/documents/users/` +
+      `${encodeURIComponent(pathUid)}`;
+
+    const userResponse =
+      await fetch(
+        userUrl,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${accessToken.token}`,
+
+            Accept:
+              "application/json",
+          },
+
+          cache: "no-store",
+        }
       );
 
-    const sessionFromPath =
-      gameTelemetryIndex >= 0 &&
-      gameTelemetryIndex + 1 <
-        pathParts.length
-        ? pathParts[
-            gameTelemetryIndex + 1
-          ]
-        : null;
+    if (!userResponse.ok) {
+      const errorText =
+        await userResponse.text();
+
+      throw new Error(
+        `Unable to retrieve external user consent: ` +
+        `${userResponse.status} ${errorText}`
+      );
+    }
+
+    const userDocument =
+      (await userResponse.json()) as
+        RawFirestoreDocument;
 
     // ---------------------------------------------------------
-    // 9. Inspect UID field
+    // 11. Evaluate consent
     //
-    // Do NOT attempt mapping yet.
-    // Do NOT attempt consent yet.
+    // Current AMY eligibility:
     //
-    // We first want to know what the source actually contains.
+    // consent.research === true
+    // consent.ageVerified === true
     // ---------------------------------------------------------
 
-    const uidValue =
-      fields.uid ?? null;
-
-    const sessionIdValue =
-      fields.sessionId ?? null;
-
-    const eventValue =
-      fields.event ?? null;
-
-    const createdAtValue =
-      fields.createdAt ?? null;
+    const consent =
+      evaluateFirestoreConsent(
+        userDocument
+      );
 
     // ---------------------------------------------------------
-    // 10. Return diagnostic information
+    // 12. Return SAFE result
     //
-    // TEMPORARY ADMIN DIAGNOSTIC ONLY.
+    // Deliberately NOT returned:
     //
-    // This may expose the source UID if one exists.
-    // Once we understand the schema, this diagnostic response
-    // should be removed.
+    // Firebase UID
+    // email
+    // displayName
+    // photoUrl
+    //
+    // No AMY database write occurs.
     // ---------------------------------------------------------
 
     return NextResponse.json({
       success: true,
-
-      diagnostic: true,
 
       authentication:
         "vercel-oidc-google-wif",
@@ -317,46 +393,32 @@ export async function GET(
 
       projectId,
 
-      documentsFound:
-        documents.length,
+      identity: {
+        valid: true,
 
-      documentName,
+        pathUidPresent:
+          true,
 
-      pathAnalysis: {
-        pathParts,
+        eventUidPresent:
+          true,
 
-        usersIndex,
-
-        uidFromPath,
-
-        gameTelemetryIndex,
-
-        sessionFromPath,
+        pathAndEventUidMatch:
+          true,
       },
 
-      fieldNames,
+      consent,
 
-      fieldAnalysis: {
-        hasUidField:
-          Object.prototype
-            .hasOwnProperty
-            .call(
-              fields,
-              "uid"
-            ),
+      importEligible:
+        consent.eligible,
 
-        uidValue,
-
-        sessionIdValue,
-
-        eventValue,
-
-        createdAtValue,
-      },
+      message:
+        consent.eligible
+          ? "Telemetry identity and research consent validated. Event is eligible for AMY import."
+          : "Telemetry identity validated, but consent requirements are not satisfied.",
     });
   } catch (error) {
     console.error(
-      "External Firestore diagnostic failed:",
+      "External Firestore consent test failed:",
       error
     );
 
