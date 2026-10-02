@@ -1,4 +1,7 @@
 import { adminDb } from "@/lib/firebase-admin";
+import {
+  FieldValue,
+} from "firebase-admin/firestore";
 
 export type FirestoreIntegration = {
   id: string;
@@ -296,4 +299,61 @@ export async function getFirestoreIntegration(
         data.watermarkEventId
       ),
   };
+}
+
+export type FirestoreIntegrationWatermark = {
+  timestamp: string;
+  documentPath: string;
+};
+
+
+export async function updateFirestoreIntegrationWatermark(
+  integrationId: string,
+  watermark: FirestoreIntegrationWatermark
+): Promise<void> {
+  const integrationRef =
+    adminDb
+      .collection("integrations")
+      .doc(integrationId);
+
+  await adminDb.runTransaction(
+    async (transaction) => {
+      const snapshot =
+        await transaction.get(
+          integrationRef
+        );
+
+      if (!snapshot.exists) {
+        throw new Error(
+          `Integration ${integrationId} does not exist.`
+        );
+      }
+
+      transaction.update(
+        integrationRef,
+        {
+          watermarkTimestamp:
+            watermark.timestamp,
+
+          /*
+           * Historical field name.
+           *
+           * The value stored here is actually the complete
+           * source Firestore document path.
+           *
+           * We'll migrate the field name later without
+           * changing sync behavior.
+           */
+          watermarkEventId:
+            watermark.documentPath,
+
+          syncStatus:
+            "synced",
+
+          lastSyncAt:
+            FieldValue.serverTimestamp(),
+        }
+      );
+    }
+  );
 }
