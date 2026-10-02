@@ -43,6 +43,44 @@ type FirestoreListDocumentsResponse = {
     string;
 };
 
+function getEventTimestamp(
+  document: RawFirestoreDocument,
+  timestampField: string
+): string | null {
+  const value =
+    document.fields?.[
+      timestampField
+    ];
+
+  if (
+    value &&
+    typeof value.timestampValue ===
+      "string"
+  ) {
+    return value.timestampValue;
+  }
+
+  return null;
+}
+
+function getDocumentId(
+  documentName?: string
+): string {
+  if (!documentName) {
+    return "";
+  }
+
+  const parts =
+    documentName.split("/");
+
+  return (
+    parts[
+      parts.length - 1
+    ] ?? ""
+  );
+}
+
+
 /*
  * =========================================================
  * READ ONE COMPLETE SESSION
@@ -188,26 +226,97 @@ export async function readCompleteFirestoreSession(
         : null;
   } while (pageToken);
 
-  if (
-    documents.length === 0
-  ) {
-    throw new Error(
-      `Firestore session ${session.sessionId} contains no events.`
-    );
-  }
+if (
+  documents.length === 0
+) {
+  throw new Error(
+    `Firestore session ${session.sessionId} contains no events.`
+  );
+}
 
-  return {
-    uid:
-      session.uid,
+ 
+/*
+ * =====================================================
+ * DETERMINISTIC CHRONOLOGICAL ORDER
+ * =====================================================
+ *
+ * Firestore listDocuments does not guarantee the
+ * chronological ordering required by AMY.
+ *
+ * Sort using:
+ *
+ *   event timestamp ASC
+ *   document ID ASC
+ *
+ * The document ID acts as the deterministic tie-breaker
+ * when two events have identical timestamps.
+ */
 
-    sessionId:
-      session.sessionId,
+const sortedDocuments =
+  [...documents].sort(
+    (a, b) => {
+      const aTimestamp =
+        getEventTimestamp(
+          a,
+          integration.timestampField
+        );
 
-    eventCount:
-      documents.length,
+      const bTimestamp =
+        getEventTimestamp(
+          b,
+          integration.timestampField
+        );
 
-    documents,
-  };
+      /*
+       * Documents without a usable timestamp sort last.
+       * The validation/import layer can subsequently
+       * reject them rather than silently assigning them
+       * an incorrect position.
+       */
+
+      if (
+        aTimestamp &&
+        bTimestamp
+      ) {
+        const comparison =
+          aTimestamp.localeCompare(
+            bTimestamp
+          );
+
+        if (
+          comparison !== 0
+        ) {
+          return comparison;
+        }
+      } else if (aTimestamp) {
+        return -1;
+      } else if (bTimestamp) {
+        return 1;
+      }
+
+      return getDocumentId(
+        a.name
+      ).localeCompare(
+        getDocumentId(
+          b.name
+        )
+      );
+    }
+  );
+
+return {
+  uid:
+    session.uid,
+
+  sessionId:
+    session.sessionId,
+
+  eventCount:
+    sortedDocuments.length,
+
+  documents:
+    sortedDocuments,
+};
 }
 
 /*
