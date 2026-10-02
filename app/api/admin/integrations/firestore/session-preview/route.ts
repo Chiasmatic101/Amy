@@ -1,4 +1,8 @@
 import {
+  evaluateFirestoreConsent,
+} from "@/lib/integrations/firestore/firestore-consent";
+
+import {
   validateFirestoreSessionDocuments,
 } from "@/lib/integrations/firestore/firestore-session-validation";
 
@@ -34,6 +38,58 @@ export const dynamic = "force-dynamic";
 
 const INTEGRATION_ID =
   "chiasmatic-calamity-firestore";
+
+
+
+async function readFirestoreUserDocument(
+  projectId: string,
+  uid: string,
+  accessToken: string
+) {
+  const url =
+    `https://firestore.googleapis.com/v1/projects/` +
+    `${encodeURIComponent(projectId)}` +
+    `/databases/(default)/documents/users/` +
+    `${encodeURIComponent(uid)}`;
+
+  const response =
+    await fetch(
+      url,
+      {
+        method: "GET",
+
+        headers: {
+          Authorization:
+            `Bearer ${accessToken}`,
+
+          Accept:
+            "application/json",
+        },
+
+        cache:
+          "no-store",
+      }
+    );
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  const result =
+    await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      `Firestore user read failed with status ${response.status}: ${JSON.stringify(
+        result
+      )}`
+    );
+  }
+
+  return result;
+}
+
+
 
 export async function GET(
   request: NextRequest
@@ -287,6 +343,74 @@ const sessionValidation =
     completeSession.documents
   );
 
+/*
+ * =====================================================
+ * CONSENT VALIDATION
+ * =====================================================
+ *
+ * Identity validation must succeed before we use the
+ * player's profile for research-consent eligibility.
+ */
+
+if (!sessionValidation.valid) {
+  return NextResponse.json(
+    {
+      success: false,
+
+      dryRun: true,
+
+      error:
+        "Complete session failed identity validation.",
+
+      identityValidation: {
+        valid:
+          sessionValidation.valid,
+
+        documentCount:
+          sessionValidation.documentCount,
+
+        validDocumentCount:
+          sessionValidation.validDocumentCount,
+
+        invalidDocumentCount:
+          sessionValidation.invalidDocumentCount,
+
+        errors:
+          sessionValidation.errors,
+      },
+    },
+    { status: 400 }
+  );
+}
+
+const userDocument =
+  await readFirestoreUserDocument(
+    integration.projectId,
+    firstSession.uid,
+    token
+  );
+
+if (!userDocument) {
+  return NextResponse.json(
+    {
+      success: false,
+
+      dryRun: true,
+
+      error:
+        "Source user profile was not found. Session is not eligible for research import.",
+    },
+    { status: 400 }
+  );
+}
+
+const consentValidation =
+  evaluateFirestoreConsent(
+    userDocument
+  );
+
+
+
     /*
      * =====================================================
      * SAFE EVENT SUMMARY
@@ -407,6 +531,23 @@ const sessionValidation =
     errors:
       sessionValidation.errors,
   },
+
+consentValidation: {
+  eligible:
+    consentValidation.eligible,
+
+  researchConsent:
+    consentValidation.researchConsent,
+
+  ageVerified:
+    consentValidation.ageVerified,
+
+  reason:
+    consentValidation.reason,
+},
+
+
+
 },
       message:
         "Complete external Firestore session retrieved successfully. No events were imported and no watermark was changed.",
