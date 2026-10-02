@@ -123,20 +123,26 @@ export async function GET(
           },
 
           body: JSON.stringify({
-            structuredQuery: {
-              from: [
-                {
-                  collectionId:
-                    "events",
+  structuredQuery: {
+    from: [
+      {
+        collectionId: "events",
+        allDescendants: true,
+      },
+    ],
 
-                  allDescendants:
-                    true,
-                },
-              ],
+    orderBy: [
+      {
+        field: {
+          fieldPath: "createdAt",
+        },
+        direction: "DESCENDING",
+      },
+    ],
 
-              limit: 1,
-            },
-          }),
+    limit: 1,
+  },
+}),
 
           cache: "no-store",
         }
