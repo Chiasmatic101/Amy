@@ -246,6 +246,181 @@ export async function GET(
         .filter(Boolean) as
         RawFirestoreDocument[];
 
+/*
+ * =====================================================
+ * OPTIONAL SECOND-PAGE TEST
+ * =====================================================
+ *
+ * ?next=true proves that the cursor generated from
+ * page 1 correctly retrieves page 2.
+ *
+ * Nothing is persisted.
+ */
+
+let secondPage:
+  | {
+      returned: number;
+      firstTimestamp: string | null;
+      firstDocumentPath: string | null;
+      lastTimestamp: string | null;
+      lastDocumentPath: string | null;
+    }
+  | null = null;
+
+const testNextPage =
+  request.nextUrl.searchParams.get(
+    "next"
+  ) === "true";
+
+if (
+  testNextPage &&
+  documents.length > 0
+) {
+  const lastPageOneDocument =
+    documents[
+      documents.length - 1
+    ];
+
+  const cursorTimestamp =
+    getStringField(
+      lastPageOneDocument,
+      integration.timestampField
+    );
+
+  const cursorDocumentPath =
+    getDocumentPath(
+      lastPageOneDocument.name
+    );
+
+  if (
+    cursorTimestamp &&
+    cursorDocumentPath
+  ) {
+    const secondPageIntegration = {
+      ...integration,
+
+      watermarkTimestamp:
+        cursorTimestamp,
+
+      watermarkEventId:
+        cursorDocumentPath,
+    };
+
+    const secondQuery =
+      buildFirestoreSyncQuery(
+        secondPageIntegration,
+        100
+      );
+
+    const secondResponse =
+      await fetch(
+        queryUrl,
+        {
+          method: "POST",
+
+          headers: {
+            Authorization:
+              `Bearer ${token}`,
+
+            "Content-Type":
+              "application/json",
+
+            Accept:
+              "application/json",
+          },
+
+          body:
+            JSON.stringify(
+              secondQuery
+            ),
+
+          cache:
+            "no-store",
+        }
+      );
+
+    const secondResult =
+      await secondResponse.json();
+
+    if (!secondResponse.ok) {
+      return NextResponse.json(
+        {
+          success: false,
+
+          stage:
+            "second-page-query",
+
+          status:
+            secondResponse.status,
+
+          googleError:
+            secondResult,
+        },
+        { status: 500 }
+      );
+    }
+
+    const secondDocuments =
+      (
+        Array.isArray(
+          secondResult
+        )
+          ? secondResult
+          : []
+      )
+        .map(
+          (item) =>
+            item.document
+        )
+        .filter(Boolean) as
+        RawFirestoreDocument[];
+
+    const firstSecondPage =
+      secondDocuments[0];
+
+    const lastSecondPage =
+      secondDocuments[
+        secondDocuments.length - 1
+      ];
+
+    secondPage = {
+      returned:
+        secondDocuments.length,
+
+      firstTimestamp:
+        firstSecondPage
+          ? getStringField(
+              firstSecondPage,
+              integration.timestampField
+            )
+          : null,
+
+      firstDocumentPath:
+        firstSecondPage
+          ? getDocumentPath(
+              firstSecondPage.name
+            )
+          : null,
+
+      lastTimestamp:
+        lastSecondPage
+          ? getStringField(
+              lastSecondPage,
+              integration.timestampField
+            )
+          : null,
+
+      lastDocumentPath:
+        lastSecondPage
+          ? getDocumentPath(
+              lastSecondPage.name
+            )
+          : null,
+    };
+  }
+}
+
+
     /*
      * =====================================================
      * DETERMINE POTENTIAL NEXT WATERMARK
@@ -365,6 +540,8 @@ export async function GET(
       },
 
       nextWatermark,
+
+      secondPage,
 
       preview,
 
