@@ -8,14 +8,6 @@ import {
 } from "@/lib/integrations/firestore/vercel-google-auth";
 
 import {
-  evaluateFirestoreConsent,
-} from "@/lib/integrations/firestore/firestore-consent";
-
-import {
-  prepareFirestoreImport,
-} from "@/lib/integrations/firestore/firestore-importer";
-
-import {
   RawFirestoreDocument,
 } from "@/lib/integrations/firestore/firestore-mapper";
 
@@ -60,7 +52,7 @@ export async function GET(
     }
 
     // ---------------------------------------------------------
-    // 2. Get the external Firestore project ID
+    // 2. External Firestore project
     // ---------------------------------------------------------
 
     const projectId =
@@ -79,7 +71,7 @@ export async function GET(
     }
 
     // ---------------------------------------------------------
-    // 3. Authenticate
+    // 3. Authenticate to Google
     //
     // Vercel OIDC
     //      ↓
@@ -101,16 +93,11 @@ export async function GET(
     }
 
     // ---------------------------------------------------------
-    // 4. Query every subcollection called "events"
+    // 4. Collection-group query
     //
-    // Example:
+    // Find documents in every collection named "events".
     //
-    // gameTelemetry
-    //   └── telemetryId
-    //         └── events
-    //               └── eventDocument
-    //
-    // allDescendants=true performs a collection-group query.
+    // For this diagnostic we only need ONE document.
     // ---------------------------------------------------------
 
     const queryUrl =
@@ -118,54 +105,61 @@ export async function GET(
       `${encodeURIComponent(projectId)}` +
       `/databases/(default)/documents:runQuery`;
 
-    const response = await fetch(
-      queryUrl,
-      {
-        method: "POST",
+    const response =
+      await fetch(
+        queryUrl,
+        {
+          method: "POST",
 
-        headers: {
-          Authorization:
-            `Bearer ${accessToken.token}`,
-          "Content-Type":
-            "application/json",
-          Accept:
-            "application/json",
-        },
+          headers: {
+            Authorization:
+              `Bearer ${accessToken.token}`,
 
-        body: JSON.stringify({
-          structuredQuery: {
-            from: [
-              {
-                collectionId:
-                  "events",
-                allDescendants:
-                  true,
-              },
-            ],
+            "Content-Type":
+              "application/json",
 
-            limit: 100,
+            Accept:
+              "application/json",
           },
-        }),
 
-        cache: "no-store",
-      }
-    );
+          body: JSON.stringify({
+            structuredQuery: {
+              from: [
+                {
+                  collectionId:
+                    "events",
+
+                  allDescendants:
+                    true,
+                },
+              ],
+
+              limit: 1,
+            },
+          }),
+
+          cache: "no-store",
+        }
+      );
 
     const result =
       await response.json();
 
     // ---------------------------------------------------------
-    // 5. Handle Google / Firestore query errors
+    // 5. Firestore error handling
     // ---------------------------------------------------------
 
     if (!response.ok) {
       return NextResponse.json(
         {
           success: false,
+
           stage:
             "firestore-query",
+
           status:
             response.status,
+
           googleError:
             result,
         },
@@ -174,14 +168,7 @@ export async function GET(
     }
 
     // ---------------------------------------------------------
-    // 6. Extract Firestore documents
-    //
-    // runQuery returns:
-    //
-    // [
-    //   { document: {...} },
-    //   { document: {...} }
-    // ]
+    // 6. Extract returned documents
     // ---------------------------------------------------------
 
     const queryResults =
@@ -201,198 +188,120 @@ export async function GET(
     if (documents.length === 0) {
       return NextResponse.json({
         success: true,
-        authentication:
-          "vercel-oidc-google-wif",
-        connection:
-          "firestore-rest",
+
+        diagnostic: true,
+
         projectId,
-        query:
-          "collection-group",
-        collection:
-          "events",
+
         documentsFound: 0,
+
         message:
           "No external telemetry events were found.",
       });
     }
 
     // ---------------------------------------------------------
-    // 7. Prepare the telemetry import
-    //
-    // This:
-    //
-    // - maps source events
-    // - pseudonymizes the player
-    // - groups events into sessions
-    // - sorts them chronologically
-    // - assigns eventSequence
-    //
-    // It DOES NOT write anything into AMY.
-    // ---------------------------------------------------------
-
-    const dryRun =
-      prepareFirestoreImport(
-        documents,
-        "chiasmatic-calamity"
-      );
-
-    // ---------------------------------------------------------
-    // 8. Determine the external player identifier
-    //
-    // Example Firestore document name:
-    //
-    // projects/candycrushtrial/
-    // databases/(default)/
-    // documents/
-    // gameTelemetry/
-    // 1779897291355/
-    // events/
-    // 4SJ2FUMi4B5UnwqJq7CU
-    //
-    // last item:
-    //   event document ID
-    //
-    // third-to-last:
-    //   telemetry / external player ID
+    // 7. Inspect exactly what Firestore returned
     // ---------------------------------------------------------
 
     const firstDocument =
       documents[0];
 
-    if (!firstDocument?.name) {
+    if (!firstDocument) {
       throw new Error(
-        "No Firestore telemetry document available for consent test."
+        "No Firestore document available for inspection."
       );
     }
 
-   const pathParts =
-  firstDocument.name.split("/");
+    const documentName =
+      firstDocument.name ?? null;
 
-const usersIndex =
-  pathParts.lastIndexOf("users");
+    const fields =
+      firstDocument.fields ?? {};
 
-const externalPlayerId =
-  usersIndex >= 0 &&
-  usersIndex + 1 < pathParts.length
-    ? pathParts[usersIndex + 1]
-    : null;
+    const fieldNames =
+      Object.keys(fields);
 
-if (!externalPlayerId) {
-  throw new Error(
-    "Unable to determine external player ID from Firestore document path."
-  );
-}
     // ---------------------------------------------------------
-    // 9. Retrieve the external user's consent record
+    // 8. Inspect the Firestore path
     //
-    // IMPORTANT:
+    // We are specifically looking for whether the path is:
     //
-    // We only use this source identity long enough to evaluate
-    // whether AMY is allowed to import the player's research
-    // telemetry.
+    // users/{uid}/gameTelemetry/{sessionId}/events/{eventId}
     //
-    // We do NOT return the user record or externalPlayerId.
+    // OR:
+    //
+    // gameTelemetry/{sessionId}/events/{eventId}
     // ---------------------------------------------------------
 
-const telemetryId =
-  externalPlayerId;
+    const pathParts =
+      documentName
+        ? documentName.split("/")
+        : [];
 
-const telemetryUrl =
-  `https://firestore.googleapis.com/v1/projects/` +
-  `${encodeURIComponent(projectId)}` +
-  `/databases/(default)/documents/gameTelemetry/` +
-  `${encodeURIComponent(telemetryId)}`;
-
-const telemetryResponse =
-  await fetch(
-    telemetryUrl,
-    {
-      headers: {
-        Authorization:
-          `Bearer ${accessToken.token}`,
-        Accept:
-          "application/json",
-      },
-      cache: "no-store",
-    }
-  );
-
-const telemetryDocument =
-  telemetryResponse.ok
-    ? await telemetryResponse.json()
-    : null;
-
-
-
-    const userUrl =
-      `https://firestore.googleapis.com/v1/projects/` +
-      `${encodeURIComponent(projectId)}` +
-      `/databases/(default)/documents/users/` +
-      `${encodeURIComponent(externalPlayerId)}`;
-
-    const userResponse =
-      await fetch(
-        userUrl,
-        {
-          headers: {
-            Authorization:
-              `Bearer ${accessToken.token}`,
-            Accept:
-              "application/json",
-          },
-
-          cache: "no-store",
-        }
+    const usersIndex =
+      pathParts.lastIndexOf(
+        "users"
       );
 
-    // ---------------------------------------------------------
-    // 10. Handle missing / inaccessible user record
-    // ---------------------------------------------------------
+    const uidFromPath =
+      usersIndex >= 0 &&
+      usersIndex + 1 <
+        pathParts.length
+        ? pathParts[
+            usersIndex + 1
+          ]
+        : null;
 
-    if (!userResponse.ok) {
-      const errorText =
-        await userResponse.text();
-
-      throw new Error(
-        `Unable to retrieve external user consent: ` +
-        `${userResponse.status} ${errorText}`
-      );
-    }
-
-    const userDocument =
-      (await userResponse.json()) as
-        RawFirestoreDocument;
-
-    // ---------------------------------------------------------
-    // 11. Evaluate research consent
-    //
-    // Required:
-    //
-    // consent.research == true
-    // consent.ageVerified == true
-    // ---------------------------------------------------------
-
-    const consent =
-      evaluateFirestoreConsent(
-        userDocument
+    const gameTelemetryIndex =
+      pathParts.lastIndexOf(
+        "gameTelemetry"
       );
 
+    const sessionFromPath =
+      gameTelemetryIndex >= 0 &&
+      gameTelemetryIndex + 1 <
+        pathParts.length
+        ? pathParts[
+            gameTelemetryIndex + 1
+          ]
+        : null;
+
     // ---------------------------------------------------------
-    // 12. Return SAFE test result
+    // 9. Inspect UID field
     //
-    // Deliberately excluded:
+    // Do NOT attempt mapping yet.
+    // Do NOT attempt consent yet.
     //
-    // externalPlayerId
-    // uid
-    // email
-    // displayName
-    // photoUrl
+    // We first want to know what the source actually contains.
+    // ---------------------------------------------------------
+
+    const uidValue =
+      fields.uid ?? null;
+
+    const sessionIdValue =
+      fields.sessionId ?? null;
+
+    const eventValue =
+      fields.event ?? null;
+
+    const createdAtValue =
+      fields.createdAt ?? null;
+
+    // ---------------------------------------------------------
+    // 10. Return diagnostic information
     //
-    // No AMY database writes occur here.
+    // TEMPORARY ADMIN DIAGNOSTIC ONLY.
+    //
+    // This may expose the source UID if one exists.
+    // Once we understand the schema, this diagnostic response
+    // should be removed.
     // ---------------------------------------------------------
 
     return NextResponse.json({
       success: true,
+
+      diagnostic: true,
 
       authentication:
         "vercel-oidc-google-wif",
@@ -402,26 +311,46 @@ const telemetryDocument =
 
       projectId,
 
-      query:
-        "collection-group",
-
-      collection:
-        "events",
-
       documentsFound:
         documents.length,
 
-      consent,
+      documentName,
 
-      dryRun,
+      pathAnalysis: {
+        pathParts,
+
+        usersIndex,
+
+        uidFromPath,
+
+        gameTelemetryIndex,
+
+        sessionFromPath,
+      },
+
+      fieldNames,
+
+      fieldAnalysis: {
+        hasUidField:
+          Object.prototype
+            .hasOwnProperty
+            .call(
+              fields,
+              "uid"
+            ),
+
+        uidValue,
+
+        sessionIdValue,
+
+        eventValue,
+
+        createdAtValue,
+      },
     });
   } catch (error) {
-    // ---------------------------------------------------------
-    // 13. Authentication / runtime errors
-    // ---------------------------------------------------------
-
     console.error(
-      "External Firestore collection-group test failed:",
+      "External Firestore diagnostic failed:",
       error
     );
 
