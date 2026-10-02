@@ -271,11 +271,10 @@ export async function GET(
       );
 
     const externalPlayerId =
-      pathParts.length >= 3
-        ? pathParts[
-            pathParts.length - 3
-          ]
-        : null;
+  pathParts.length >= 6 &&
+  pathParts[pathParts.length - 6] === "users"
+    ? pathParts[pathParts.length - 5]
+    : null;
 
     if (!externalPlayerId) {
       throw new Error(
@@ -294,6 +293,36 @@ export async function GET(
     //
     // We do NOT return the user record or externalPlayerId.
     // ---------------------------------------------------------
+
+const telemetryId =
+  externalPlayerId;
+
+const telemetryUrl =
+  `https://firestore.googleapis.com/v1/projects/` +
+  `${encodeURIComponent(projectId)}` +
+  `/databases/(default)/documents/gameTelemetry/` +
+  `${encodeURIComponent(telemetryId)}`;
+
+const telemetryResponse =
+  await fetch(
+    telemetryUrl,
+    {
+      headers: {
+        Authorization:
+          `Bearer ${accessToken.token}`,
+        Accept:
+          "application/json",
+      },
+      cache: "no-store",
+    }
+  );
+
+const telemetryDocument =
+  telemetryResponse.ok
+    ? await telemetryResponse.json()
+    : null;
+
+
 
     const userUrl =
       `https://firestore.googleapis.com/v1/projects/` +

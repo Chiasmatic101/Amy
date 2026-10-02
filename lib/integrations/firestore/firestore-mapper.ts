@@ -159,15 +159,16 @@ export function mapFirestoreEvent(
   const pathParts =
   document.name?.split("/") ?? [];
 
-const telemetryId =
-  pathParts.length >= 3
-    ? pathParts[pathParts.length - 3]
+const pathUid =
+  pathParts.length >= 6 &&
+  pathParts[pathParts.length - 6] === "users"
+    ? pathParts[pathParts.length - 5]
     : null;
 
 const externalPlayerId =
   typeof fields.uid === "string"
     ? fields.uid
-    : telemetryId;
+    : pathUid;
 
   const eventTimestamp =
     typeof fields.createdAt === "string"
