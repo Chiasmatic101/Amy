@@ -1,6 +1,15 @@
-import { NextRequest, NextResponse } from "next/server";
+import {
+  NextRequest,
+  NextResponse,
+} from "next/server";
 
-import { getAmyGoogleAuthClient } from "@/lib/integrations/firestore/vercel-google-auth";
+import {
+  getAmyGoogleAuthClient,
+} from "@/lib/integrations/firestore/vercel-google-auth";
+
+import {
+  evaluateFirestoreConsent,
+} from "@/lib/integrations/firestore/firestore-consent";
 
 import {
   prepareFirestoreImport,
@@ -10,33 +19,35 @@ import {
   RawFirestoreDocument,
 } from "@/lib/integrations/firestore/firestore-mapper";
 
-import {
-  mapFirestoreEvent,
-} from "@/lib/integrations/firestore/firestore-mapper";
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(request: NextRequest) {
+export async function GET(
+  request: NextRequest
+) {
   try {
     // ---------------------------------------------------------
     // 1. Protect this administrative endpoint
     // ---------------------------------------------------------
 
-    const adminSecret = process.env.AMY_ADMIN_SECRET;
+    const adminSecret =
+      process.env.AMY_ADMIN_SECRET;
 
     if (!adminSecret) {
       return NextResponse.json(
         {
           success: false,
-          error: "AMY_ADMIN_SECRET is not configured.",
+          error:
+            "AMY_ADMIN_SECRET is not configured.",
         },
         { status: 500 }
       );
     }
 
     const suppliedSecret =
-      request.headers.get("x-amy-admin-secret");
+      request.headers.get(
+        "x-amy-admin-secret"
+      );
 
     if (suppliedSecret !== adminSecret) {
       return NextResponse.json(
@@ -53,7 +64,8 @@ export async function GET(request: NextRequest) {
     // ---------------------------------------------------------
 
     const projectId =
-      process.env.CHIASMATIC_CALAMITY_PROJECT_ID;
+      process.env
+        .CHIASMATIC_CALAMITY_PROJECT_ID;
 
     if (!projectId) {
       return NextResponse.json(
@@ -76,7 +88,8 @@ export async function GET(request: NextRequest) {
     // AMY Firestore Connector service account
     // ---------------------------------------------------------
 
-    const authClient = getAmyGoogleAuthClient();
+    const authClient =
+      getAmyGoogleAuthClient();
 
     const accessToken =
       await authClient.getAccessToken();
@@ -90,77 +103,85 @@ export async function GET(request: NextRequest) {
     // ---------------------------------------------------------
     // 4. Query every subcollection called "events"
     //
-    // Example external structure:
+    // Example:
     //
     // gameTelemetry
-    //   ├── telemetryId-A
-    //   │      └── events
-    //   │            └── eventDocument
-    //   │
-    //   └── telemetryId-B
-    //          └── events
-    //                └── eventDocument
+    //   └── telemetryId
+    //         └── events
+    //               └── eventDocument
     //
     // allDescendants=true performs a collection-group query.
     // ---------------------------------------------------------
 
-    const url =
+    const queryUrl =
       `https://firestore.googleapis.com/v1/projects/` +
       `${encodeURIComponent(projectId)}` +
       `/databases/(default)/documents:runQuery`;
 
-    const response = await fetch(url, {
-      method: "POST",
+    const response = await fetch(
+      queryUrl,
+      {
+        method: "POST",
 
-      headers: {
-        Authorization: `Bearer ${accessToken.token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-
-      body: JSON.stringify({
-        structuredQuery: {
-          from: [
-            {
-              collectionId: "events",
-              allDescendants: true,
-            },
-          ],
-
-          limit: 100,
+        headers: {
+          Authorization:
+            `Bearer ${accessToken.token}`,
+          "Content-Type":
+            "application/json",
+          Accept:
+            "application/json",
         },
-      }),
 
-      cache: "no-store",
-    });
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [
+              {
+                collectionId:
+                  "events",
+                allDescendants:
+                  true,
+              },
+            ],
 
-    const result = await response.json();
+            limit: 100,
+          },
+        }),
+
+        cache: "no-store",
+      }
+    );
+
+    const result =
+      await response.json();
 
     // ---------------------------------------------------------
-    // 5. Handle Google / Firestore errors
+    // 5. Handle Google / Firestore query errors
     // ---------------------------------------------------------
 
     if (!response.ok) {
       return NextResponse.json(
         {
           success: false,
-          stage: "firestore-query",
-          status: response.status,
-          googleError: result,
+          stage:
+            "firestore-query",
+          status:
+            response.status,
+          googleError:
+            result,
         },
         { status: 500 }
       );
     }
 
     // ---------------------------------------------------------
-    // 6. Firestore runQuery returns an array:
+    // 6. Extract Firestore documents
+    //
+    // runQuery returns:
     //
     // [
     //   { document: {...} },
     //   { document: {...} }
     // ]
-    //
-    // Extract the actual documents.
     // ---------------------------------------------------------
 
     const queryResults =
@@ -168,72 +189,206 @@ export async function GET(request: NextRequest) {
         ? result
         : [];
 
-    const documents = queryResults
-      .map((item) => item.document)
-      .filter(Boolean);
+    const documents =
+      queryResults
+        .map(
+          (item) =>
+            item.document
+        )
+        .filter(Boolean) as
+        RawFirestoreDocument[];
+
+    if (documents.length === 0) {
+      return NextResponse.json({
+        success: true,
+        authentication:
+          "vercel-oidc-google-wif",
+        connection:
+          "firestore-rest",
+        projectId,
+        query:
+          "collection-group",
+        collection:
+          "events",
+        documentsFound: 0,
+        message:
+          "No external telemetry events were found.",
+      });
+    }
 
     // ---------------------------------------------------------
-    // 7. Return a SAFE sample
+    // 7. Prepare the telemetry import
     //
-    // We deliberately do NOT return:
+    // This:
     //
+    // - maps source events
+    // - pseudonymizes the player
+    // - groups events into sessions
+    // - sorts them chronologically
+    // - assigns eventSequence
+    //
+    // It DOES NOT write anything into AMY.
+    // ---------------------------------------------------------
+
+    const dryRun =
+      prepareFirestoreImport(
+        documents,
+        "chiasmatic-calamity"
+      );
+
+    // ---------------------------------------------------------
+    // 8. Determine the external player identifier
+    //
+    // Example Firestore document name:
+    //
+    // projects/candycrushtrial/
+    // databases/(default)/
+    // documents/
+    // gameTelemetry/
+    // 1779897291355/
+    // events/
+    // 4SJ2FUMi4B5UnwqJq7CU
+    //
+    // last item:
+    //   event document ID
+    //
+    // third-to-last:
+    //   telemetry / external player ID
+    // ---------------------------------------------------------
+
+    const firstDocument =
+      documents[0];
+
+    if (!firstDocument?.name) {
+      throw new Error(
+        "No Firestore telemetry document available for consent test."
+      );
+    }
+
+    const pathParts =
+      firstDocument.name.split(
+        "/"
+      );
+
+    const externalPlayerId =
+      pathParts.length >= 3
+        ? pathParts[
+            pathParts.length - 3
+          ]
+        : null;
+
+    if (!externalPlayerId) {
+      throw new Error(
+        "Unable to determine external player ID."
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 9. Retrieve the external user's consent record
+    //
+    // IMPORTANT:
+    //
+    // We only use this source identity long enough to evaluate
+    // whether AMY is allowed to import the player's research
+    // telemetry.
+    //
+    // We do NOT return the user record or externalPlayerId.
+    // ---------------------------------------------------------
+
+    const userUrl =
+      `https://firestore.googleapis.com/v1/projects/` +
+      `${encodeURIComponent(projectId)}` +
+      `/databases/(default)/documents/users/` +
+      `${encodeURIComponent(externalPlayerId)}`;
+
+    const userResponse =
+      await fetch(
+        userUrl,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${accessToken.token}`,
+            Accept:
+              "application/json",
+          },
+
+          cache: "no-store",
+        }
+      );
+
+    // ---------------------------------------------------------
+    // 10. Handle missing / inaccessible user record
+    // ---------------------------------------------------------
+
+    if (!userResponse.ok) {
+      const errorText =
+        await userResponse.text();
+
+      throw new Error(
+        `Unable to retrieve external user consent: ` +
+        `${userResponse.status} ${errorText}`
+      );
+    }
+
+    const userDocument =
+      (await userResponse.json()) as
+        RawFirestoreDocument;
+
+    // ---------------------------------------------------------
+    // 11. Evaluate research consent
+    //
+    // Required:
+    //
+    // consent.research == true
+    // consent.ageVerified == true
+    // ---------------------------------------------------------
+
+    const consent =
+      evaluateFirestoreConsent(
+        userDocument
+      );
+
+    // ---------------------------------------------------------
+    // 12. Return SAFE test result
+    //
+    // Deliberately excluded:
+    //
+    // externalPlayerId
     // uid
     // email
     // displayName
     // photoUrl
     //
-    // This endpoint is only proving that AMY can discover
-    // gameplay events across telemetry IDs.
-    // ---------------------------------------------------------
-const dryRun = prepareFirestoreImport(
-  documents as RawFirestoreDocument[],
-  "chiasmatic-calamity"
-);
-        /*
-          A document name should look approximately like:
-
-          projects/candycrushtrial/
-          databases/(default)/
-          documents/
-          gameTelemetry/
-          1779897291355/
-          events/
-          4SJ2FUMi4B5UnwqJq7CU
-
-          Therefore:
-
-          last item     = event document ID
-          third-to-last = telemetry ID
-        */
-
-
-    // ---------------------------------------------------------
-    // 8. Successful result
+    // No AMY database writes occur here.
     // ---------------------------------------------------------
 
- return NextResponse.json({
-  success: true,
+    return NextResponse.json({
+      success: true,
 
-  authentication:
-    "vercel-oidc-google-wif",
+      authentication:
+        "vercel-oidc-google-wif",
 
-  connection:
-    "firestore-rest",
+      connection:
+        "firestore-rest",
 
-  projectId,
+      projectId,
 
-  query:
-    "collection-group",
+      query:
+        "collection-group",
 
-  collection:
-    "events",
+      collection:
+        "events",
 
-  dryRun,
-});
+      documentsFound:
+        documents.length,
 
+      consent,
+
+      dryRun,
+    });
   } catch (error) {
     // ---------------------------------------------------------
-    // 9. Authentication / unexpected errors
+    // 13. Authentication / runtime errors
     // ---------------------------------------------------------
 
     console.error(
@@ -245,7 +400,8 @@ const dryRun = prepareFirestoreImport(
       {
         success: false,
 
-        stage: "authentication-or-runtime",
+        stage:
+          "authentication-or-runtime",
 
         error:
           error instanceof Error
