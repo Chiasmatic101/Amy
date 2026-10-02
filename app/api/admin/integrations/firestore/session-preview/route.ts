@@ -1,4 +1,9 @@
 import {
+  validateFirestoreSessionDocuments,
+} from "@/lib/integrations/firestore/firestore-session-validation";
+
+
+import {
   NextRequest,
   NextResponse,
 } from "next/server";
@@ -261,6 +266,27 @@ export async function GET(
       );
     }
 
+/*
+ * =====================================================
+ * VALIDATE COMPLETE SESSION IDENTITY
+ * =====================================================
+ *
+ * Every event must agree on:
+ *
+ * - player UID in the path
+ * - player UID in the event
+ * - session ID in the path
+ * - session ID in the event
+ *
+ * No data is written during this diagnostic.
+ */
+
+const sessionValidation =
+  validateFirestoreSessionDocuments(
+    firstSession,
+    completeSession.documents
+  );
+
     /*
      * =====================================================
      * SAFE EVENT SUMMARY
@@ -338,28 +364,50 @@ export async function GET(
           discovery.uniqueSessionCount,
       },
 
-      completeSession: {
-        sessionId:
-          completeSession.sessionId,
+   completeSession: {
+  sessionId:
+    completeSession.sessionId,
 
-        eventCount:
-          completeSession.eventCount,
+  eventCount:
+    completeSession.eventCount,
 
-        firstEvent,
+  firstEvent,
 
-        lastEvent,
+  lastEvent,
 
-        containsSessionStart:
-          eventNames.includes(
-            "game_session_started"
-          ),
+  containsSessionStart:
+    eventNames.includes(
+      "game_session_started"
+    ),
 
-        containsSessionEnd:
-          eventNames.includes(
-            "game_session_ended"
-          ),
-      },
+  containsSessionEnd:
+    eventNames.includes(
+      "game_session_ended"
+    ),
 
+  identityValidation: {
+    valid:
+      sessionValidation.valid,
+
+    documentCount:
+      sessionValidation.documentCount,
+
+    validDocumentCount:
+      sessionValidation.validDocumentCount,
+
+    invalidDocumentCount:
+      sessionValidation.invalidDocumentCount,
+
+    /*
+     * Safe to expose diagnostic reasons,
+     * but we're deliberately not returning
+     * any UID values.
+     */
+
+    errors:
+      sessionValidation.errors,
+  },
+},
       message:
         "Complete external Firestore session retrieved successfully. No events were imported and no watermark was changed.",
     });
