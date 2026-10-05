@@ -1,7 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import {
+  useRouter,
+  useSearchParams,
+} from "next/navigation";
 import { useState } from "react";
 
 type ConnectionStatus =
@@ -13,6 +16,9 @@ type ConnectionStatus =
 export default function FirestoreSetupPage() {
   const searchParams =
     useSearchParams();
+
+    const router =
+    useRouter();
 
   const gameName =
     searchParams.get("gameName") ??
@@ -118,6 +124,31 @@ export default function FirestoreSetupPage() {
     );
   }
 }
+
+
+function continueToConfiguration() {
+  if (
+    status !== "success" ||
+    !projectId.trim()
+  ) {
+    return;
+  }
+
+  const params =
+    new URLSearchParams({
+      gameName,
+      developerName,
+      platform,
+      provider: "firestore",
+      projectId: projectId.trim(),
+    });
+
+  router.push(
+    `/dashboard/games/new/firestore/configure?${params.toString()}`
+  );
+}
+
+
 
   function copyServiceAccount() {
     if (
@@ -455,19 +486,20 @@ export default function FirestoreSetupPage() {
             until the integration is activated.
           </p>
 
-          <button
-            type="button"
-            disabled={
-              status !== "success"
-            }
-            className={`rounded-full px-6 py-3 text-sm font-medium ${
-              status === "success"
-                ? "bg-black text-white"
-                : "cursor-not-allowed bg-neutral-200 text-neutral-400"
-            }`}
-          >
-            Configure telemetry →
-          </button>
+         <button
+  type="button"
+  onClick={continueToConfiguration}
+  disabled={
+    status !== "success"
+  }
+  className={`rounded-full px-6 py-3 text-sm font-medium ${
+    status === "success"
+      ? "bg-black text-white"
+      : "cursor-not-allowed bg-neutral-200 text-neutral-400"
+  }`}
+>
+  Configure telemetry →
+</button>
 
         </div>
 
