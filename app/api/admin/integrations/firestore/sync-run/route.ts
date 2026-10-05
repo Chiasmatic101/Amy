@@ -16,6 +16,10 @@ import {
 } from "@/lib/integrations/firestore/firestore-sync-engine";
 
 import {
+  withSyncCursor,
+} from "@/lib/integrations/firestore/firestore-sync-reader";
+
+import {
   getAmyGoogleAuthClient,
 } from "@/lib/integrations/firestore/vercel-google-auth";
 
@@ -30,16 +34,16 @@ export const dynamic =
 const INTEGRATION_ID =
   "chiasmatic-calamity-firestore";
 
+const PAGE_SIZE =
+  100;
+
+const MAX_PAGES_PER_RUN =
+  5;
+
 
 export async function POST(
   request: NextRequest
 ) {
-  /*
-   * Keep the lease ID outside the main try block so
-   * error handling knows whether this request actually
-   * acquired ownership.
-   */
-
   let acquiredLeaseId:
     string | null =
     null;
@@ -87,13 +91,13 @@ export async function POST(
      * =====================================================
      */
 
-    const integration =
+    const originalIntegration =
       await getFirestoreIntegration(
         INTEGRATION_ID
       );
 
     if (
-      integration.status !==
+      originalIntegration.status !==
       "active"
     ) {
       throw new Error(
@@ -104,13 +108,13 @@ export async function POST(
 
     /*
      * =====================================================
-     * ACQUIRE SYNC LEASE
+     * ACQUIRE LEASE
      * =====================================================
      */
 
     const lease =
       await acquireFirestoreSyncLease(
-        integration.id
+        originalIntegration.id
       );
 
     if (
@@ -160,43 +164,240 @@ export async function POST(
       );
     }
 
-
-    /*
-     * =====================================================
-     * PROCESS ONE DISCOVERY PAGE
-     * =====================================================
-     */
-
-    const result =
-      await runFirestoreSyncPage(
-        integration,
-        accessToken.token,
-        100
-      );
+    const token =
+      accessToken.token;
 
 
     /*
      * =====================================================
-     * PERSIST WATERMARK
+     * MULTI-PAGE SYNCHRONIZATION
      * =====================================================
      *
-     * runFirestoreSyncPage only returns successfully if
-     * every non-skippable operation on the page succeeded.
+     * Start with the integration exactly as it was loaded
+     * from AMY.
+     *
+     * After each successful page:
+     *
+     * 1. persist its watermark
+     * 2. update the in-memory cursor
+     * 3. continue to the next page
+     *
+     * Therefore a later page failure does NOT lose the
+     * progress from earlier successful pages.
      */
 
-    let watermarkAdvanced =
+    let currentIntegration =
+      originalIntegration;
+
+    let pagesProcessed =
+      0;
+
+    let discoveryDocuments =
+      0;
+
+    let modernDocuments =
+      0;
+
+    let legacyDocuments =
+      0;
+
+    let invalidDocuments =
+      0;
+
+    let sessionsDiscovered =
+      0;
+
+    let sessionsProcessed =
+      0;
+
+    let sessionsImported =
+      0;
+
+    let sessionsSkippedConsent =
+      0;
+
+    let eventsReceived =
+      0;
+
+    let eventsCreated =
+      0;
+
+    let eventsDuplicates =
+      0;
+
+    let caughtUp =
       false;
 
-    if (
-      result.nextCursor
+    let finalCursor:
+      {
+        timestamp: string;
+        documentPath: string;
+      } | null =
+      null;
+
+    const pageResults:
+      Array<{
+        page: number;
+        documents: number;
+        sessionsDiscovered: number;
+        sessionsImported: number;
+        eventsCreated: number;
+        eventsDuplicates: number;
+        watermarkAdvanced: boolean;
+      }> =
+      [];
+
+
+    for (
+      let pageNumber = 1;
+      pageNumber <=
+        MAX_PAGES_PER_RUN;
+      pageNumber += 1
     ) {
+      const result =
+        await runFirestoreSyncPage(
+          currentIntegration,
+          token,
+          PAGE_SIZE
+        );
+
+      /*
+       * No documents means we've reached the end of the
+       * currently available source data.
+       */
+
+      if (
+        result.discovery.documents ===
+        0
+      ) {
+        caughtUp =
+          true;
+
+        break;
+      }
+
+      pagesProcessed +=
+        1;
+
+      discoveryDocuments +=
+        result.discovery.documents;
+
+      modernDocuments +=
+        result.discovery.modernDocuments;
+
+      legacyDocuments +=
+        result.discovery.legacyDocuments;
+
+      invalidDocuments +=
+        result.discovery.invalidDocuments;
+
+      sessionsDiscovered +=
+        result.discovery.sessionsDiscovered;
+
+      sessionsProcessed +=
+        result.processing.sessionsProcessed;
+
+      sessionsImported +=
+        result.processing.sessionsImported;
+
+      sessionsSkippedConsent +=
+        result.processing.sessionsSkippedConsent;
+
+      eventsReceived +=
+        result.processing.eventsReceived;
+
+      eventsCreated +=
+        result.processing.eventsCreated;
+
+      eventsDuplicates +=
+        result.processing.eventsDuplicates;
+
+
+      /*
+       * A non-empty successful discovery page should give
+       * us a cursor representing its final source document.
+       */
+
+      if (
+        !result.nextCursor
+      ) {
+        throw new Error(
+          `Synchronization page ${pageNumber} contained documents but returned no cursor.`
+        );
+      }
+
+
+      /*
+       * ===================================================
+       * COMMIT THIS PAGE
+       * ===================================================
+       *
+       * This is deliberately inside the loop.
+       *
+       * If page 4 fails, the watermarks from pages 1-3
+       * have already been safely persisted.
+       */
+
       await updateFirestoreIntegrationWatermark(
-        integration.id,
+        originalIntegration.id,
         result.nextCursor
       );
 
-      watermarkAdvanced =
-        true;
+      finalCursor =
+        result.nextCursor;
+
+
+      pageResults.push({
+        page:
+          pageNumber,
+
+        documents:
+          result.discovery.documents,
+
+        sessionsDiscovered:
+          result.discovery.sessionsDiscovered,
+
+        sessionsImported:
+          result.processing.sessionsImported,
+
+        eventsCreated:
+          result.processing.eventsCreated,
+
+        eventsDuplicates:
+          result.processing.eventsDuplicates,
+
+        watermarkAdvanced:
+          true,
+      });
+
+
+      /*
+       * Prepare the in-memory integration for the next page.
+       *
+       * We do not need another Firestore read merely to get
+       * the watermark we just wrote.
+       */
+
+      currentIntegration =
+        withSyncCursor(
+          currentIntegration,
+          result.nextCursor
+        );
+
+
+      /*
+       * If the source reader tells us there isn't another
+       * page available, we are caught up.
+       */
+
+      if (
+        !result.hasMore
+      ) {
+        caughtUp =
+          true;
+
+        break;
+      }
     }
 
 
@@ -207,7 +408,7 @@ export async function POST(
      */
 
     await releaseFirestoreSyncLease(
-      integration.id,
+      originalIntegration.id,
       acquiredLeaseId,
       "synced"
     );
@@ -228,38 +429,72 @@ export async function POST(
 
       integration: {
         id:
-          integration.id,
+          originalIntegration.id,
 
         gameId:
-          integration.gameId,
+          originalIntegration.gameId,
 
         environment:
-          integration.environment,
+          originalIntegration.environment,
       },
 
       previousWatermark: {
         timestamp:
-          integration.watermarkTimestamp,
+          originalIntegration.watermarkTimestamp,
 
         documentPath:
-          integration.watermarkEventId,
+          originalIntegration.watermarkEventId,
       },
 
-      sync:
-        result,
+      limits: {
+        pageSize:
+          PAGE_SIZE,
 
-      watermarkAdvanced,
+        maxPages:
+          MAX_PAGES_PER_RUN,
 
-      newWatermark:
-        result.nextCursor
-          ? {
-              timestamp:
-                result.nextCursor.timestamp,
+        maxDiscoveryDocuments:
+          PAGE_SIZE *
+          MAX_PAGES_PER_RUN,
+      },
 
-              documentPath:
-                result.nextCursor.documentPath,
-            }
-          : null,
+      summary: {
+        pagesProcessed,
+
+        discoveryDocuments,
+
+        modernDocuments,
+
+        legacyDocuments,
+
+        invalidDocuments,
+
+        sessionsDiscovered,
+
+        sessionsProcessed,
+
+        sessionsImported,
+
+        sessionsSkippedConsent,
+
+        eventsReceived,
+
+        eventsCreated,
+
+        eventsDuplicates,
+      },
+
+      pageResults,
+
+      caughtUp,
+
+      stoppedAtPageLimit:
+        !caughtUp &&
+        pagesProcessed ===
+          MAX_PAGES_PER_RUN,
+
+      finalWatermark:
+        finalCursor,
 
       lease: {
         acquired:
@@ -270,9 +505,9 @@ export async function POST(
       },
 
       message:
-        watermarkAdvanced
-          ? "Firestore synchronization page completed, watermark advanced, and lease released."
-          : "Firestore synchronization completed with no new watermark to persist. Lease released.",
+        caughtUp
+          ? "Firestore synchronization caught up with the currently available source data."
+          : "Firestore synchronization stopped safely at the configured page limit.",
     });
   } catch (error) {
     const errorMessage =
@@ -290,9 +525,6 @@ export async function POST(
      * =====================================================
      * FAILURE CLEANUP
      * =====================================================
-     *
-     * Only attempt cleanup if this request actually
-     * acquired the lease.
      */
 
     if (
@@ -323,6 +555,7 @@ export async function POST(
       }
     }
 
+
     return NextResponse.json(
       {
         success:
@@ -332,7 +565,7 @@ export async function POST(
           errorMessage,
 
         message:
-          "Synchronization failed. The watermark was not intentionally advanced by the failed processing stage.",
+          "Synchronization stopped. Any earlier successfully completed pages retain their committed watermarks.",
       },
       {
         status: 500,
