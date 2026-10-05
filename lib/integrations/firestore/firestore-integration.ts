@@ -1,6 +1,8 @@
 import { adminDb } from "@/lib/firebase-admin";
+import crypto from "crypto";
 import {
   FieldValue,
+  Timestamp,
 } from "firebase-admin/firestore";
 
 export type FirestoreIntegration = {
@@ -351,6 +353,244 @@ export async function updateFirestoreIntegrationWatermark(
             "synced",
 
           lastSyncAt:
+            FieldValue.serverTimestamp(),
+        }
+      );
+    }
+  );
+}
+export type FirestoreSyncLeaseResult = {
+  acquired: boolean;
+  leaseId: string | null;
+  expiresAt: string | null;
+};
+
+
+const FIRESTORE_SYNC_LEASE_MS =
+  5 * 60 * 1000;
+
+
+export async function acquireFirestoreSyncLease(
+  integrationId: string
+): Promise<FirestoreSyncLeaseResult> {
+  const integrationRef =
+    adminDb
+      .collection("integrations")
+      .doc(integrationId);
+
+  const leaseId =
+    crypto.randomUUID();
+
+  const now =
+    new Date();
+
+  const expiresAt =
+    new Date(
+      now.getTime() +
+        FIRESTORE_SYNC_LEASE_MS
+    );
+
+  return adminDb.runTransaction(
+    async (transaction) => {
+      const snapshot =
+        await transaction.get(
+          integrationRef
+        );
+
+      if (!snapshot.exists) {
+        throw new Error(
+          `Integration ${integrationId} does not exist.`
+        );
+      }
+
+      const data =
+        snapshot.data();
+
+      const existingLeaseId =
+        typeof data?.syncLeaseId ===
+        "string"
+          ? data.syncLeaseId
+          : null;
+
+      const existingExpiresAt =
+        data?.syncLeaseExpiresAt &&
+        typeof data.syncLeaseExpiresAt.toDate ===
+          "function"
+          ? data.syncLeaseExpiresAt.toDate()
+          : null;
+
+      /*
+       * An active, unexpired lease already owns
+       * this integration.
+       */
+
+      if (
+        existingLeaseId &&
+        existingExpiresAt &&
+        existingExpiresAt.getTime() >
+          now.getTime()
+      ) {
+        return {
+          acquired:
+            false,
+
+          leaseId:
+            null,
+
+          expiresAt:
+            existingExpiresAt.toISOString(),
+        };
+      }
+
+      /*
+       * No active lease, or the previous lease expired.
+       */
+
+      transaction.update(
+        integrationRef,
+        {
+          syncLeaseId:
+            leaseId,
+
+          syncLeaseExpiresAt:
+            Timestamp.fromDate(
+              expiresAt
+            ),
+
+          syncStatus:
+            "syncing",
+
+          syncStartedAt:
+            FieldValue.serverTimestamp(),
+
+          syncLastError:
+            FieldValue.delete(),
+        }
+      );
+
+      return {
+        acquired:
+          true,
+
+        leaseId,
+
+        expiresAt:
+          expiresAt.toISOString(),
+      };
+    }
+  );
+}
+
+
+export async function releaseFirestoreSyncLease(
+  integrationId: string,
+  leaseId: string,
+  status:
+    | "synced"
+    | "error"
+): Promise<void> {
+  const integrationRef =
+    adminDb
+      .collection("integrations")
+      .doc(integrationId);
+
+  await adminDb.runTransaction(
+    async (transaction) => {
+      const snapshot =
+        await transaction.get(
+          integrationRef
+        );
+
+      if (!snapshot.exists) {
+        throw new Error(
+          `Integration ${integrationId} does not exist.`
+        );
+      }
+
+      const data =
+        snapshot.data();
+
+      /*
+       * Only the process that owns the current lease
+       * is allowed to release it.
+       */
+
+      if (
+        data?.syncLeaseId !==
+        leaseId
+      ) {
+        throw new Error(
+          "Synchronization lease ownership changed before release."
+        );
+      }
+
+      transaction.update(
+        integrationRef,
+        {
+          syncLeaseId:
+            FieldValue.delete(),
+
+          syncLeaseExpiresAt:
+            FieldValue.delete(),
+
+          syncStatus:
+            status,
+
+          syncFinishedAt:
+            FieldValue.serverTimestamp(),
+        }
+      );
+    }
+  );
+}
+
+
+export async function markFirestoreSyncError(
+  integrationId: string,
+  leaseId: string,
+  errorMessage: string
+): Promise<void> {
+  const integrationRef =
+    adminDb
+      .collection("integrations")
+      .doc(integrationId);
+
+  await adminDb.runTransaction(
+    async (transaction) => {
+      const snapshot =
+        await transaction.get(
+          integrationRef
+        );
+
+      if (!snapshot.exists) {
+        return;
+      }
+
+      const data =
+        snapshot.data();
+
+      /*
+       * Don't allow an old failed process to overwrite
+       * the status of a newer lease.
+       */
+
+      if (
+        data?.syncLeaseId !==
+        leaseId
+      ) {
+        return;
+      }
+
+      transaction.update(
+        integrationRef,
+        {
+          syncLastError:
+            errorMessage.substring(
+              0,
+              1000
+            ),
+
+          syncLastErrorAt:
             FieldValue.serverTimestamp(),
         }
       );

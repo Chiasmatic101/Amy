@@ -4,7 +4,10 @@ import {
 } from "next/server";
 
 import {
+  acquireFirestoreSyncLease,
   getFirestoreIntegration,
+  markFirestoreSyncError,
+  releaseFirestoreSyncLease,
   updateFirestoreIntegrationWatermark,
 } from "@/lib/integrations/firestore/firestore-integration";
 
@@ -31,6 +34,16 @@ const INTEGRATION_ID =
 export async function POST(
   request: NextRequest
 ) {
+  /*
+   * Keep the lease ID outside the main try block so
+   * error handling knows whether this request actually
+   * acquired ownership.
+   */
+
+  let acquiredLeaseId:
+    string | null =
+    null;
+
   try {
     /*
      * =====================================================
@@ -91,6 +104,44 @@ export async function POST(
 
     /*
      * =====================================================
+     * ACQUIRE SYNC LEASE
+     * =====================================================
+     */
+
+    const lease =
+      await acquireFirestoreSyncLease(
+        integration.id
+      );
+
+    if (
+      !lease.acquired ||
+      !lease.leaseId
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+
+          error:
+            "Synchronization already in progress.",
+
+          leaseExpiresAt:
+            lease.expiresAt,
+
+          message:
+            "Another synchronization process currently owns this integration.",
+        },
+        {
+          status: 409,
+        }
+      );
+    }
+
+    acquiredLeaseId =
+      lease.leaseId;
+
+
+    /*
+     * =====================================================
      * GOOGLE AUTHENTICATION
      * =====================================================
      */
@@ -112,20 +163,8 @@ export async function POST(
 
     /*
      * =====================================================
-     * PROCESS ONE PAGE
+     * PROCESS ONE DISCOVERY PAGE
      * =====================================================
-     *
-     * The sync engine:
-     *
-     * - reads from the CURRENT saved watermark
-     * - discovers sessions
-     * - validates identity
-     * - checks consent
-     * - canonicalizes
-     * - writes idempotently
-     *
-     * If an actual processing failure occurs,
-     * runFirestoreSyncPage throws.
      */
 
     const result =
@@ -141,11 +180,8 @@ export async function POST(
      * PERSIST WATERMARK
      * =====================================================
      *
-     * We reach this code only if the page was handled
-     * successfully.
-     *
-     * If there is no nextCursor, there was nothing new
-     * to process, so there is nothing to advance.
+     * runFirestoreSyncPage only returns successfully if
+     * every non-skippable operation on the page succeeded.
      */
 
     let watermarkAdvanced =
@@ -166,7 +202,23 @@ export async function POST(
 
     /*
      * =====================================================
-     * SAFE RESPONSE
+     * RELEASE LEASE
+     * =====================================================
+     */
+
+    await releaseFirestoreSyncLease(
+      integration.id,
+      acquiredLeaseId,
+      "synced"
+    );
+
+    acquiredLeaseId =
+      null;
+
+
+    /*
+     * =====================================================
+     * RESPONSE
      * =====================================================
      */
 
@@ -209,16 +261,67 @@ export async function POST(
             }
           : null,
 
+      lease: {
+        acquired:
+          true,
+
+        released:
+          true,
+      },
+
       message:
         watermarkAdvanced
-          ? "Firestore synchronization page completed and watermark advanced."
-          : "Firestore synchronization completed with no new watermark to persist.",
+          ? "Firestore synchronization page completed, watermark advanced, and lease released."
+          : "Firestore synchronization completed with no new watermark to persist. Lease released.",
     });
   } catch (error) {
+    const errorMessage =
+      error instanceof Error
+        ? error.message
+        : "Unknown Firestore synchronization error.";
+
     console.error(
       "Firestore synchronization failed:",
       error
     );
+
+
+    /*
+     * =====================================================
+     * FAILURE CLEANUP
+     * =====================================================
+     *
+     * Only attempt cleanup if this request actually
+     * acquired the lease.
+     */
+
+    if (
+      acquiredLeaseId
+    ) {
+      try {
+        await markFirestoreSyncError(
+          INTEGRATION_ID,
+          acquiredLeaseId,
+          errorMessage
+        );
+
+        await releaseFirestoreSyncLease(
+          INTEGRATION_ID,
+          acquiredLeaseId,
+          "error"
+        );
+
+        acquiredLeaseId =
+          null;
+      } catch (
+        cleanupError
+      ) {
+        console.error(
+          "Firestore synchronization cleanup failed:",
+          cleanupError
+        );
+      }
+    }
 
     return NextResponse.json(
       {
@@ -226,12 +329,10 @@ export async function POST(
           false,
 
         error:
-          error instanceof Error
-            ? error.message
-            : "Unknown Firestore synchronization error.",
+          errorMessage,
 
         message:
-          "Synchronization failed. Watermark was not advanced.",
+          "Synchronization failed. The watermark was not intentionally advanced by the failed processing stage.",
       },
       {
         status: 500,
