@@ -5,7 +5,7 @@ import {
 
 import {
   acquireFirestoreSyncLease,
-  getFirestoreIntegration,
+  listActiveFirestoreIntegrations,
   markFirestoreSyncError,
   releaseFirestoreSyncLease,
   updateFirestoreIntegrationWatermark,
@@ -31,9 +31,6 @@ export const dynamic =
   "force-dynamic";
 
 
-const INTEGRATION_ID =
-  "chiasmatic-calamity-firestore";
-
 const PAGE_SIZE =
   100;
 
@@ -41,8 +38,15 @@ const MAX_PAGES =
   5;
 
 
-export async function GET(
-  request: NextRequest
+/*
+ * =========================================================
+ * SYNC ONE INTEGRATION
+ * =========================================================
+ */
+
+async function syncIntegration(
+  integration: any,
+  token: string
 ) {
   let leaseId:
     string | null =
@@ -51,88 +55,27 @@ export async function GET(
   try {
     /*
      * =====================================================
-     * CRON AUTHENTICATION
-     * =====================================================
-     */
-
-    const cronSecret =
-      process.env.CRON_SECRET;
-
-    if (!cronSecret) {
-      throw new Error(
-        "CRON_SECRET is not configured."
-      );
-    }
-
-    const authorization =
-      request.headers.get(
-        "authorization"
-      );
-
-    if (
-      authorization !==
-      `Bearer ${cronSecret}`
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Unauthorized.",
-        },
-        {
-          status: 401,
-        }
-      );
-    }
-
-
-    /*
-     * =====================================================
-     * LOAD INTEGRATION
-     * =====================================================
-     */
-
-    const originalIntegration =
-      await getFirestoreIntegration(
-        INTEGRATION_ID
-      );
-
-    if (
-      originalIntegration.status !==
-      "active"
-    ) {
-      return NextResponse.json({
-        success: true,
-
-        skipped: true,
-
-        reason:
-          "Integration is not active.",
-      });
-    }
-
-
-    /*
-     * =====================================================
-     * ACQUIRE LEASE
+     * ACQUIRE INTEGRATION-SPECIFIC LEASE
      * =====================================================
      */
 
     const lease =
       await acquireFirestoreSyncLease(
-        originalIntegration.id
+        integration.id
       );
 
     if (
       !lease.acquired ||
       !lease.leaseId
     ) {
-      /*
-       * For cron, an existing lease is not an error.
-       * Another process is already doing the work.
-       */
-
-      return NextResponse.json({
+      return {
         success: true,
+
+        integrationId:
+          integration.id,
+
+        gameId:
+          integration.gameId,
 
         skipped: true,
 
@@ -141,35 +84,21 @@ export async function GET(
 
         leaseExpiresAt:
           lease.expiresAt,
-      });
+
+        pagesProcessed: 0,
+        documentsProcessed: 0,
+        sessionsImported: 0,
+        sessionsSkippedConsent: 0,
+        eventsCreated: 0,
+        eventsDuplicates: 0,
+        caughtUp: false,
+        stoppedAtPageLimit: false,
+        finalWatermark: null,
+      };
     }
 
     leaseId =
       lease.leaseId;
-
-
-    /*
-     * =====================================================
-     * GOOGLE AUTHENTICATION
-     * =====================================================
-     */
-
-    const authClient =
-      getAmyGoogleAuthClient();
-
-    const accessToken =
-      await authClient.getAccessToken();
-
-    if (
-      !accessToken.token
-    ) {
-      throw new Error(
-        "Google Workload Identity Federation did not return an access token."
-      );
-    }
-
-    const token =
-      accessToken.token;
 
 
     /*
@@ -179,7 +108,7 @@ export async function GET(
      */
 
     let currentIntegration =
-      originalIntegration;
+      integration;
 
     let pagesProcessed =
       0;
@@ -235,18 +164,20 @@ export async function GET(
         !result.nextCursor
       ) {
         throw new Error(
-          `Cron synchronization page ${pageNumber} returned documents without a cursor.`
+          `Synchronization page ${pageNumber} returned documents without a cursor.`
         );
       }
+
 
       /*
        * Commit every successful page independently.
        */
 
       await updateFirestoreIntegrationWatermark(
-        originalIntegration.id,
+        integration.id,
         result.nextCursor
       );
+
 
       pagesProcessed +=
         1;
@@ -271,7 +202,7 @@ export async function GET(
 
 
       /*
-       * Advance our in-memory cursor.
+       * Advance the in-memory cursor.
        */
 
       currentIntegration =
@@ -294,12 +225,12 @@ export async function GET(
 
     /*
      * =====================================================
-     * RELEASE LEASE
+     * RELEASE INTEGRATION-SPECIFIC LEASE
      * =====================================================
      */
 
     await releaseFirestoreSyncLease(
-      originalIntegration.id,
+      integration.id,
       leaseId,
       "synced"
     );
@@ -308,13 +239,16 @@ export async function GET(
       null;
 
 
-    return NextResponse.json({
+    return {
       success: true,
 
-      automated: true,
-
       integrationId:
-        originalIntegration.id,
+        integration.id,
+
+      gameId:
+        integration.gameId,
+
+      skipped: false,
 
       pagesProcessed,
 
@@ -335,11 +269,321 @@ export async function GET(
         pagesProcessed === MAX_PAGES,
 
       finalWatermark,
+    };
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error
+        ? error.message
+        : "Unknown Firestore synchronization error.";
+
+    console.error(
+      `Automated synchronization failed for integration ${integration.id}:`,
+      error
+    );
+
+
+    /*
+     * =====================================================
+     * CLEAN UP THIS INTEGRATION ONLY
+     * =====================================================
+     */
+
+    if (
+      leaseId
+    ) {
+      try {
+        await markFirestoreSyncError(
+          integration.id,
+          leaseId,
+          errorMessage
+        );
+
+        await releaseFirestoreSyncLease(
+          integration.id,
+          leaseId,
+          "error"
+        );
+      } catch (
+        cleanupError
+      ) {
+        console.error(
+          `Synchronization cleanup failed for integration ${integration.id}:`,
+          cleanupError
+        );
+      }
+    }
+
+
+    /*
+     * IMPORTANT:
+     *
+     * We return the error instead of throwing it.
+     *
+     * This means one developer's broken integration
+     * will not prevent the remaining integrations
+     * from synchronizing.
+     */
+
+    return {
+      success: false,
+
+      integrationId:
+        integration.id,
+
+      gameId:
+        integration.gameId,
+
+      skipped: false,
+
+      error:
+        errorMessage,
+
+      pagesProcessed: 0,
+      documentsProcessed: 0,
+      sessionsImported: 0,
+      sessionsSkippedConsent: 0,
+      eventsCreated: 0,
+      eventsDuplicates: 0,
+      caughtUp: false,
+      stoppedAtPageLimit: false,
+      finalWatermark: null,
+    };
+  }
+}
+
+
+/*
+ * =========================================================
+ * CRON ENTRY POINT
+ * =========================================================
+ */
+
+export async function GET(
+  request: NextRequest
+) {
+  try {
+    /*
+     * =====================================================
+     * CRON AUTHENTICATION
+     * =====================================================
+     */
+
+    const cronSecret =
+      process.env.CRON_SECRET;
+
+    if (!cronSecret) {
+      throw new Error(
+        "CRON_SECRET is not configured."
+      );
+    }
+
+    const authorization =
+      request.headers.get(
+        "authorization"
+      );
+
+    if (
+      authorization !==
+      `Bearer ${cronSecret}`
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Unauthorized.",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
+
+    /*
+     * =====================================================
+     * DISCOVER ACTIVE FIRESTORE INTEGRATIONS
+     * =====================================================
+     */
+
+    const integrations =
+      await listActiveFirestoreIntegrations();
+
+
+    if (
+      integrations.length === 0
+    ) {
+      return NextResponse.json({
+        success: true,
+
+        automated: true,
+
+        integrationsFound: 0,
+
+        message:
+          "No active Firestore integrations were found.",
+      });
+    }
+
+
+    /*
+     * =====================================================
+     * GOOGLE AUTHENTICATION
+     * =====================================================
+     *
+     * We obtain the AMY Google access token once for this
+     * cron invocation and reuse it for each Firestore
+     * integration.
+     */
+
+    const authClient =
+      getAmyGoogleAuthClient();
+
+    const accessToken =
+      await authClient.getAccessToken();
+
+    if (
+      !accessToken.token
+    ) {
+      throw new Error(
+        "Google Workload Identity Federation did not return an access token."
+      );
+    }
+
+    const token =
+      accessToken.token;
+
+
+    /*
+     * =====================================================
+     * PROCESS ACTIVE INTEGRATIONS
+     * =====================================================
+     *
+     * Sequential processing is intentional for now.
+     *
+     * It keeps the prototype predictable and avoids
+     * unnecessary concurrent work against Firestore.
+     */
+
+    const results = [];
+
+    for (
+      const integration of integrations
+    ) {
+      const result =
+        await syncIntegration(
+          integration,
+          token
+        );
+
+      results.push(
+        result
+      );
+    }
+
+
+    /*
+     * =====================================================
+     * BUILD RUN SUMMARY
+     * =====================================================
+     */
+
+    const successful =
+      results.filter(
+        (result) =>
+          result.success
+      ).length;
+
+    const failed =
+      results.filter(
+        (result) =>
+          !result.success
+      ).length;
+
+    const skipped =
+      results.filter(
+        (result) =>
+          result.skipped
+      ).length;
+
+    const pagesProcessed =
+      results.reduce(
+        (total, result) =>
+          total +
+          result.pagesProcessed,
+        0
+      );
+
+    const documentsProcessed =
+      results.reduce(
+        (total, result) =>
+          total +
+          result.documentsProcessed,
+        0
+      );
+
+    const sessionsImported =
+      results.reduce(
+        (total, result) =>
+          total +
+          result.sessionsImported,
+        0
+      );
+
+    const sessionsSkippedConsent =
+      results.reduce(
+        (total, result) =>
+          total +
+          result.sessionsSkippedConsent,
+        0
+      );
+
+    const eventsCreated =
+      results.reduce(
+        (total, result) =>
+          total +
+          result.eventsCreated,
+        0
+      );
+
+    const eventsDuplicates =
+      results.reduce(
+        (total, result) =>
+          total +
+          result.eventsDuplicates,
+        0
+      );
+
+
+    return NextResponse.json({
+      success:
+        failed === 0,
+
+      automated: true,
+
+      integrationsFound:
+        integrations.length,
+
+      summary: {
+        successful,
+        failed,
+        skipped,
+
+        pagesProcessed,
+        documentsProcessed,
+
+        sessionsImported,
+        sessionsSkippedConsent,
+
+        eventsCreated,
+        eventsDuplicates,
+      },
+
+      integrations:
+        results,
 
       message:
-        caughtUp
-          ? "Automated Firestore synchronization is caught up."
-          : "Automated Firestore synchronization stopped at the configured page limit.",
+        failed === 0
+          ? "Automated Firestore synchronization completed."
+          : "Automated Firestore synchronization completed with one or more integration errors.",
     });
   } catch (error) {
     const errorMessage =
@@ -353,35 +597,11 @@ export async function GET(
     );
 
 
-    if (
-      leaseId
-    ) {
-      try {
-        await markFirestoreSyncError(
-          INTEGRATION_ID,
-          leaseId,
-          errorMessage
-        );
-
-        await releaseFirestoreSyncLease(
-          INTEGRATION_ID,
-          leaseId,
-          "error"
-        );
-      } catch (
-        cleanupError
-      ) {
-        console.error(
-          "Automated sync cleanup failed:",
-          cleanupError
-        );
-      }
-    }
-
-
     return NextResponse.json(
       {
         success: false,
+
+        automated: true,
 
         error:
           errorMessage,

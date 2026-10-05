@@ -545,6 +545,24 @@ export async function releaseFirestoreSyncLease(
 }
 
 
+export async function listActiveFirestoreIntegrations() {
+  const snapshot = await adminDb
+    .collection("integrations")
+    .where("provider", "==", "firestore")
+    .where("status", "==", "active")
+    .get();
+
+  return snapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data(),
+  }));
+}
+
+
+
+
+
+
 export async function markFirestoreSyncError(
   integrationId: string,
   leaseId: string,
